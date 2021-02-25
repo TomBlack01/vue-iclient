@@ -1,9 +1,8 @@
 import getFeatures from './get-features';
 import tonumber from 'lodash.tonumber';
-import isEqual from 'lodash.isequal';
 import max from 'lodash.max';
 import orderBy from 'lodash.orderby';
-import { clearNumberComma } from './util';
+import { clearNumberComma, filterInvalidData } from './util';
 import { statisticsFeatures } from './statistics';
 
 // 三方服务请求的结果为单对象的时候，是否要转成多个features
@@ -14,6 +13,24 @@ export function tranformSingleToMulti(data) {
     return Object.assign(data, statisticsFeatures(data.features));
   }
   return data;
+}
+
+export function sortData(features, datasetOptions, maxFeatures, xBar) {
+  const matchItem = datasetOptions.find(item => item.sort && item.sort !== 'unsort');
+  let nextFeatures = [].concat(features);
+  if (matchItem) {
+    nextFeatures = orderBy(
+      features,
+      feature => isNaN(+feature.properties[matchItem.yField]) ? -Number.MAX_VALUE : +feature.properties[matchItem.yField],
+      matchItem.sort === 'ascending' ? 'asc' : 'desc'
+    );
+  }
+  const maxLen = +maxFeatures;
+  if (maxLen && nextFeatures.length > maxLen) {
+    nextFeatures.length = maxLen;
+  }
+  matchItem && xBar && nextFeatures.reverse();
+  return nextFeatures;
 }
 
 /**
@@ -43,10 +60,10 @@ export default class EchartsDataService {
   constructor(dataset, datasetOptions) {
     // 设置默认值
     dataset.withCredentials = dataset.withCredentials || false; // 请求认证
-
     this.dataset = dataset;
     this.datasetOptions = datasetOptions;
     this.dataCache = null; // 缓存的是请求后的数据
+    this.sortDataCache = null;
     this.axisDatas = []; // 坐标data
     this.serieDatas = []; // series data
     this.gridAxis = { xAxis: [], yAxis: {} }; // 直角坐标系
@@ -63,17 +80,22 @@ export default class EchartsDataService {
     // 设置datasets的默认配置type，withCredentials
     let promise = new Promise((resolve, reject) => {
       // 请求数据，请求成功后，解析数据
-      getFeatures(dataset)
+      const matchItem = this.datasetOptions.find(item => item.sort !== 'unsort');
+      const maxFeatures = matchItem ? '' : dataset.maxFeatures;
+      getFeatures({ ...dataset, maxFeatures })
         .then(data => {
           // 兼容三方服务接口返回的一个普通的对象
           if (data.transformed && !!data.features.length) {
             data = tranformSingleToMulti(data);
           }
-          // 设置this.data
-          this._setData(data);
           // 解析数据，生成dataOption
           let options;
-          if (this.dataset.type === 'iPortal' || this.dataset.type === 'iServer' || this.dataset.type === 'rest') {
+          if (
+            this.dataset.type === 'iPortal' ||
+            this.dataset.type === 'iServer' ||
+            this.dataset.type === 'rest' ||
+            this.dataset.type === 'geoJSON'
+          ) {
             options = this.formatChartData(this.datasetOptions, xBar, data);
           }
 
@@ -98,6 +120,8 @@ export default class EchartsDataService {
     this._clearChartCache();
     // 设置datasetOptions
     this.setDatasetOptions(datasetOptions);
+    // 设置this.data
+    data = this._setData(data, xBar);
     // 生成seriedata
     datasetOptions.forEach(item => {
       // 生成YData, XData
@@ -106,6 +130,9 @@ export default class EchartsDataService {
       let serieData = this._createDataOption(fieldData, item);
       // 设置坐标
       this._createAxisData(fieldData, item);
+      if (!serieData.tooltip) {
+        serieData.tooltip = this._fixToolTip(data, item);
+      }
       this.serieDatas.push(serieData);
     });
     let gridAxis = (this.gridAxis.xAxis.length > 0 || JSON.stringify(this.gridAxis.yAxis) !== '{}') && this.gridAxis;
@@ -135,10 +162,17 @@ export default class EchartsDataService {
    * @description 给实例绑定data。
    * @param {Object} data - 从superMap的iserver,iportal中请求返回的数据
    */
-  _setData(data) {
+  _setData(data, xBar) {
+    let nextData = data;
     if (data) {
-      this.dataCache = data;
+      let nextFeatures = filterInvalidData(this.datasetOptions, data.features);
+      // 只过滤空数据但不排序的原数据
+      this.dataCache = statisticsFeatures(nextFeatures);
+      nextFeatures = sortData(nextFeatures, this.datasetOptions, this.dataset.maxFeatures, xBar);
+      nextData = statisticsFeatures(nextFeatures);
+      this.sortDataCache = nextData;
     }
+    return nextData;
   }
 
   /**
@@ -199,6 +233,30 @@ export default class EchartsDataService {
   }
 
   /**
+   * @function EchartsDataService.prototype._fixToolTip
+   * @private
+   * @description 调整tooltip显示，Todo 考虑支持用户自定义tooltip内容
+   * @param {Object} data - 数据
+   * @param {Chart-datasetOption} datasetOption - 数据解析的配置
+   * @returns {Object}  tooltip
+   */
+  _fixToolTip(data, datasetOption) {
+    if (data.transformed) {
+      if (datasetOption.seriesType === 'pie') {
+        return {
+          trigger: 'item',
+          formatter: '{b} : {c} ({d}%)'
+        };
+      }
+      return {
+        trigger: 'item',
+        formatter: '{b} : {c}'
+      };
+    }
+    return null;
+  }
+
+  /**
    * @function EchartsDataService.prototype._createSeriesData
    * @private
    * @description 生成chart的serie。
@@ -211,7 +269,7 @@ export default class EchartsDataService {
     let XData = fieldData.xData;
     let radarData = [];
     let axisData;
-    if (chartType === 'radar') {
+    if (chartType === 'radar' && XData) {
       let radarMax = this.radarMax;
       XData.forEach(text => {
         radarData.push({
@@ -225,16 +283,18 @@ export default class EchartsDataService {
         }
       };
       axisData = this.radarAxis;
-    } else if (chartType === 'bar' || chartType === 'line' || chartType === 'scatter') {
+    } else if (['bar', 'line', 'scatter', '2.5Bar'].find(item => item === chartType)) {
       let data = XData && [...XData];
       if (!this.gridAxis.xAxis) {
         this.gridAxis.xAxis = [];
         this.gridAxis.yAxis = {};
       }
-      if (this.gridAxis.xAxis.length === 0 || !isEqual(data, this.gridAxis.xAxis[0].data)) {
+      if (this.gridAxis.xAxis.length === 0) {
         this.gridAxis.xAxis.push({
           data
         });
+      } else {
+        this.gridAxis.xAxis[0] = { data };
       }
 
       axisData = this.gridAxis;
@@ -270,32 +330,8 @@ export default class EchartsDataService {
       xData = this._getFieldDatas(data, xFieldIndex);
       yData = [...fieldValues];
     }
-    result = sort && sort !== 'unsort' ? this._resortData(xData, yData, sort, xBar) : { xData, yData };
+    result = { xData, yData };
     return result;
-  }
-
-  _resortData(xData, yData, sort, xBar = false) {
-    let obj = [];
-    yData.forEach((item, index) => {
-      obj.push({ y: item, x: xData[index] });
-    });
-    obj = orderBy(
-      obj,
-      o => {
-        return o.y;
-      },
-      sort === 'ascending' ? [xBar ? 'desc' : 'asc'] : [xBar ? 'asc' : 'desc']
-    );
-    let x = [];
-    let y = [];
-    obj.forEach(item => {
-      x.push(item.x);
-      y.push(item.y);
-    });
-    return {
-      xData: x,
-      yData: y
-    };
   }
 
   /**

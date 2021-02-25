@@ -7,22 +7,26 @@ import { geti18n } from '../../../../common/_lang';
 
 /**
  * @class DrawViewModel
- * @description 量算 viewModel.
+ * @description 绘制 viewModel.
  * @param {Object} webmap - webmap实例对象。
  * @extends mapboxgl.Evented
  */
 
 export default class DrawViewModel extends mapboxgl.Evented {
-  constructor(map, mapTarget, componentName) {
+  constructor(componentName) {
     super();
-    this.map = map;
-    this.mapTarget = mapTarget;
     this.componentName = componentName;
     this.featureIds = []; // 收集当前draw所画的点线面的id
-    this._addDrawControl();
     this.activeFeature = {};
     this.dashedLayerIds = []; // 收集虚线图层的id 信息
     this.layerStyleList = {}; // 收集虚线图层的修改的样式信息
+  }
+
+  setMap(mapInfo) {
+    const { map, mapTarget } = mapInfo;
+    this.map = map;
+    this.mapTarget = mapTarget;
+    this._addDrawControl();
   }
 
   _addDrawControl() {
@@ -56,7 +60,7 @@ export default class DrawViewModel extends mapboxgl.Evented {
     if (this._isDrawing()) {
       const { features } = e;
       const feature = features[0];
-      if (feature && feature.id !== this.activeFeature.id) {
+      if (feature) {
         this._getDefaultStyle();
         this.activeFeature = feature;
         this._calcResult(feature);
@@ -262,7 +266,12 @@ export default class DrawViewModel extends mapboxgl.Evented {
     }
   }
 
-  clear() {
+  removed() {
+    this.clearAllFeatures();
+    this.draw = null;
+  }
+
+  clearAllFeatures() {
     this.featureIds && this.draw.delete(this.featureIds);
     this.featureIds = [];
     this.activeFeature = {};

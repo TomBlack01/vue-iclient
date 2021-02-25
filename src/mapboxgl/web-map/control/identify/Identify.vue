@@ -1,29 +1,36 @@
 <template>
-  <ul
+  <div
+    v-show="false"
     ref="Popup"
-    :style="[getBackgroundStyle, getTextColorStyle]"
-    :class="['sm-component-identify', {'sm-component-content-hide': isHide}]"
+    class="sm-component-identify"
+    :style="[tablePopupBgStyle, getTextColorStyle]"
   >
-    <li v-for="(value, key, index) in popupProps" :key="index" class="sm-component-identify__body">
-      <div class="sm-component-identify__left" :title="key">{{ key }}</div>
-      <div class="sm-component-identify__right" :title="value">{{ value }}</div>
-    </li>
-  </ul>
+    <ul
+      :class="[
+        autoResize ? 'sm-component-identify__auto' : 'sm-component-identify__custom',
+        'sm-component-identify__content'
+      ]"
+    >
+      <li v-for="(value, key, index) in popupProps" :key="index" class="content">
+        <div class="left ellipsis" :title="key" :style="getWidthStyle.keyWidth">{{ key }}</div>
+        <div class="right ellipsis" :title="value" :style="getWidthStyle.valueWidth">{{ value }}</div>
+      </li>
+    </ul>
+  </div>
 </template>
 
 <script>
-import Theme from '../../../../common/_mixin/theme';
+import Theme from '../../../../common/_mixin/Theme';
 import MapGetter from '../../../_mixin/map-getter';
-import Control from '../../../_mixin/control';
 import IdentifyViewModel from './IdentifyViewModel';
 import CircleStyle from '../../../_types/CircleStyle';
 import FillStyle from '../../../_types/FillStyle';
 import LineStyle from '../../../_types/LineStyle';
-import isEqual from 'lodash.isequal';
+import { setPopupArrowStyle } from '../../../../common/_utils/util';
 
 export default {
   name: 'SmIdentify',
-  mixins: [MapGetter, Control, Theme],
+  mixins: [MapGetter, Theme],
   props: {
     layers: {
       type: Array,
@@ -70,6 +77,26 @@ export default {
           })
         };
       }
+    },
+    autoResize: {
+      type: Boolean,
+      default: true
+    },
+    keyMaxWidth: {
+      type: [Number, String],
+      default: 110
+    },
+    valueMaxWidth: {
+      type: [Number, String],
+      default: 170
+    },
+    keyWidth: {
+      type: [Number, String],
+      default: 110
+    },
+    valueWidth: {
+      type: [Number, String],
+      default: 170
     }
   },
   data() {
@@ -78,101 +105,150 @@ export default {
       popupProps: {}
     };
   },
+  computed: {
+    getWidthStyle() {
+      let style = { keyWidth: {}, valueWidth: {} };
+      if (!this.autoResize) {
+        if (this.keyWidth) {
+          style.keyWidth.width = this.keyWidth + 'px';
+        }
+        if (this.valueWidth) {
+          style.valueWidth.width = this.valueWidth + 'px';
+        }
+        return style;
+      } else {
+        if (this.keyMaxWidth) {
+          style.keyWidth.maxWidth = this.keyMaxWidth + 'px';
+        }
+        if (this.valueMaxWidth) {
+          style.valueWidth.maxWidth = this.valueMaxWidth + 'px';
+        }
+      }
+      return style;
+    },
+    layersOnMap() {
+      let layersOnMap = [];
+      if (this.map) {
+        for (let i = 0; i < this.layers.length; i++) {
+          if (this.map.getLayer(this.layers[i])) {
+            layersOnMap.push(this.layers[i]);
+          }
+        }
+      }
+      return layersOnMap;
+    }
+  },
   watch: {
     layers: {
       handler(val, oldVal) {
         this.viewModel && this.viewModel.removed(oldVal);
-        if (this.layers.length > 0 && !isEqual(val, oldVal)) {
-          this.setViewModel();
-        }
-        if (this.layers.length === 0) {
-          this.map && this.map.off('click');
-        }
+        this.removeCursorEvent(oldVal);
+        this.setViewModel();
       }
     },
     layerStyle() {
       this.setViewModel();
-    },
-    backgroundData() {
-      this.changeResultPopupArrowStyle();
     }
   },
   loaded() {
     // 每次地图加载，就要隐藏（md的切换地图）
     this.isHide = true;
+    // this.changeCursorPointer = () => {
+    //   this.changeCursor('pointer', this.map);
+    //   console.log('enter');
+    // };
+    this.changeCursorGrab = () => this.changeCursor('grab', this.map);
     this.setViewModel();
-    this.map && this.bindMapClick(this.map);
   },
-  removed() {
+  removed(layers = this.layersOnMap) {
+    if (this.map) {
+      this.map.off('click', this.sourceMapClickFn);
+      this.map.off('mousemove', this.changeCursorPointer);
+      this.map.off('mouseleave', this.changeCursorGrab);
+    }
     // 清除旧的高亮的图层
     this.viewModel && this.viewModel.removed();
   },
   beforeDestroy() {
-    this.map && this.map.off('click', this.mapClickFn);
     this.$options.removed.call(this);
   },
   methods: {
     setViewModel() {
-      this.viewModel = new IdentifyViewModel(this.map, {
-        mapTarget: this.getTargetName(),
-        layers: this.layers,
-        layerStyle: this.layerStyle
-      });
+      if (this.layers) {
+        this.viewModel = new IdentifyViewModel(this.map, {
+          mapTarget: this.getTargetName(),
+          layers: this.layers,
+          layerStyle: this.layerStyle
+        });
+        this.map && this.bindMapClick(this.map);
+        this.changeClickedLayersCursor(this.layersOnMap);
+      }
     },
     // 给图层绑定popup和高亮
     bindMapClick(map) {
-      map.on('click', this.mapClickFn);
+      map.on('click', this.sourceMapClickFn);
     },
-    // 点击事件的方法
-    mapClickFn(e) {
+    // 给source中的图层绑定popup
+    sourceMapClickFn(e) {
       // 如果点击其他的要素，移除之前的高亮
+      this.viewModel.removeOverlayer(this.layers);
+      // 获取点中图层的features
+      let features = this.bindQueryRenderedFeatures(e);
+      if (features[0]) {
+        let index = this.layers && this.layers.indexOf(features[0].layer.id);
+        let fields;
+        if (this.fields instanceof Array) {
+          // 如果是二维数组
+          fields = this.fields[index];
+          // 兼容一维数组
+          if (typeof fields === 'string') {
+            fields = this.fields;
+          }
+        } else if (this.fields instanceof Object && index === 0) {
+          fields = this.fields;
+        }
+        this.layersMapClickFn(e, fields || [], features[0]);
+      }
+    },
+    // 给layer绑定queryRenderedFeatures
+    bindQueryRenderedFeatures(e, layers = this.layersOnMap) {
       let map = e.target;
-      this.viewModel.removed();
-      // set bbox as 5px reactangle area around clicked point
-      var bbox = [
+      let bbox = [
         [e.point.x - this.clickTolerance, e.point.y - this.clickTolerance],
         [e.point.x + this.clickTolerance, e.point.y + this.clickTolerance]
       ];
-      // 获取点中图层的features
-      let layersExit = true;
-      for (let i = 0; i < this.layers.length; i++) {
-        if (!map.getLayer(this.layers[i])) {
-          layersExit = false;
-          this.$message.error(this.$t('identify.layerNotExit', { layer: this.layers[i] }));
-          break;
+      let features = map.queryRenderedFeatures(bbox, {
+        layers
+      });
+      return features;
+    },
+    // 给点击的图层添加popup和高亮
+    layersMapClickFn(e, fields, feature) {
+      let map = e.target;
+      // 添加popup
+      this.addPopup(feature, e.lngLat.toArray(), fields);
+      // 高亮过滤(所有字段)
+      let filter = ['all'];
+      const filterKeys = ['smx', 'smy', 'lon', 'lat', 'longitude', 'latitude', 'x', 'y', 'usestyle', 'featureinfo'];
+      feature._vectorTileFeature._keys.forEach((key, index) => {
+        if (filterKeys.indexOf(key.toLowerCase()) === -1 && feature.properties[key] !== undefined) {
+          filter.push(['==', key, feature.properties[key]]);
         }
-      }
-      if (layersExit) {
-        var features = map.queryRenderedFeatures(bbox, {
-          layers: this.layers
-        });
-        if (features[0]) {
-          // 添加popup
-          this.addPopup(features[0], e.lngLat.toArray());
-          // 高亮过滤(所有字段)
-          let filter = ['all'];
-          const filterKeys = ['smx', 'smy', 'lon', 'lat', 'longitude', 'latitude', 'x', 'y', 'usestyle', 'featureinfo'];
-          features[0]._vectorTileFeature._keys.forEach((key, index) => {
-            if (filterKeys.indexOf(key.toLowerCase()) === -1) {
-              filter.push(['==', key, features[0].properties[key]]);
-            }
-          });
-          // 添加高亮图层
-          this.addOverlayToMap(features[0].layer, filter);
-          // 给图层加上高亮
-          if (map.getLayer(features[0].layer.id + '-SM-highlighted')) {
-            map.setFilter(features[0].layer.id + '-SM-highlighted', filter);
-          }
-        }
+      });
+      // 添加高亮图层
+      this.addOverlayToMap(feature.layer, filter);
+      // 给图层加上高亮
+      if (map.getLayer(feature.layer.id + '-identify-SM-highlighted')) {
+        map.setFilter(feature.layer.id + '-identify-SM-highlighted', filter);
       }
     },
-    // 添加popup
-    addPopup(feature, coordinates) {
+    // 过滤数据， 添加popup
+    addPopup(feature, coordinates, fields) {
       this.popupProps = {};
       if (feature.properties) {
         // 过滤字段
-        if (this.fields.length > 0) {
-          this.fields.forEach(field => {
+        if (fields.length > 0) {
+          fields.forEach(field => {
             if (feature.properties.hasOwnProperty(field)) {
               this.popupProps[field] = feature.properties[field];
             }
@@ -185,7 +261,7 @@ export default {
         this.$nextTick(() => {
           this.isHide = false; // 显示内容
           this.viewModel.addPopup(coordinates, this.$refs.Popup);
-          this.changeResultPopupArrowStyle();
+          setPopupArrowStyle(this.tablePopupBgData);
         });
       }
     },
@@ -194,30 +270,32 @@ export default {
       // 先移除之前的高亮layer
       this.viewModel.addOverlayToMap(layer, filter);
     },
-    // 箭头颜色（适应主题色）
-    changeResultPopupArrowStyle() {
-      const identifyBottomAnchor =
-        document.querySelector('.mapboxgl-popup-anchor-bottom .mapboxgl-popup-tip') ||
-        document.querySelector('.mapboxgl-popup-anchor-bottom-left .mapboxgl-popup-tip') ||
-        document.querySelector('.mapboxgl-popup-anchor-bottom-right .mapboxgl-popup-tip');
-      const identifyTopAnchor =
-        document.querySelector('.mapboxgl-popup-anchor-top .mapboxgl-popup-tip') ||
-        document.querySelector('.mapboxgl-popup-anchor-top-left .mapboxgl-popup-tip') ||
-        document.querySelector('.mapboxgl-popup-anchor-top-right .mapboxgl-popup-tip');
-      const identifyLeftAnchor = document.querySelector('.mapboxgl-popup-anchor-left .mapboxgl-popup-tip');
-      const identifyRightAnchor = document.querySelector('.mapboxgl-popup-anchor-right .mapboxgl-popup-tip');
-
-      identifyTopAnchor && (identifyTopAnchor.style.borderBottomColor = this.backgroundData);
-      identifyBottomAnchor && (identifyBottomAnchor.style.borderTopColor = this.backgroundData);
-      identifyLeftAnchor && (identifyLeftAnchor.style.borderRightColor = this.backgroundData);
-      identifyRightAnchor && (identifyRightAnchor.style.borderLeftColor = this.backgroundData);
+    changeClickedLayersCursor(layers = [], map = this.map) {
+      layers &&
+        layers.forEach(layer => {
+          map.on('mousemove', layer, this.changeCursorPointer);
+          map.on('mouseleave', layer, this.changeCursorGrab);
+        });
+    },
+    changeCursor(cursorType = 'grab', map = this.map) {
+      if (map && map.getCanvas()) {
+        map.getCanvas().style.cursor = cursorType;
+      }
+    },
+    changeCursorPointer() {
+      this.changeCursor('pointer', this.map);
+    },
+    removeCursorEvent(layers = this.layersOnMap) {
+      if (!this.map) {
+        return;
+      }
+      this.map.off('click', this.sourceMapClickFn);
+      layers.forEach(layer => {
+        this.map.off('mousemove', layer, this.changeCursorPointer);
+        this.map.off('mouseleave', layer, this.changeCursorGrab);
+        this.changeCursor('grab', this.map);
+      });
     }
   }
 };
 </script>
-
-<style lang="scss" scoped>
-.sm-component-content-hide {
-  display: none !important;
-}
-</style>

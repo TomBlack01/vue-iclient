@@ -51,11 +51,11 @@ const webpackConfig = merge(baseWebpackConfig, {
         commonjs2: 'vue-echarts',
         amd: 'vue-echarts'
       },
-      'ant-design-vue': {
-        root: 'antd',
-        commonjs: 'ant-design-vue',
-        commonjs2: 'ant-design-vue',
-        amd: 'ant-design-vue'
+      'vue-cesium': {
+        root: 'VueCesium',
+        commonjs: 'vue-cesium',
+        commonjs2: 'vue-cesium',
+        amd: 'vue-cesium'
       },
       xlsx: {
         root: 'XLSX',
@@ -73,52 +73,85 @@ const webpackConfig = merge(baseWebpackConfig, {
         amd: 'three'
       },
       'video.js': {
-        root: '_videojs',
+        root: 'videojs',
         commonjs: 'video.js',
         commonjs2: 'video.js',
         amd: 'video.js'
+      },
+      'flv.js': {
+        root: 'flvjs',
+        commonjs: 'flv.js',
+        commonjs2: 'flv.js',
+        amd: 'flv.js'
+      },
+      'videojs-flash': {
+        root: 'videojsFlash',
+        commonjs: 'videojs-flash',
+        commonjs2: 'videojs-flash',
+        amd: 'videojs-flash'
+      },
+      'videojs-flvjs-es6': {
+        root: 'videojsFlvjs',
+        commonjs: 'videojs-flvjs-es6',
+        commonjs2: 'videojs-flvjs-es6',
+        amd: 'videojs-flvjs-es6'
       }
     },
-    /// \/static\/libs\//,
     function(context, request, callback) {
+      if (/three\/examples\/jsm\/loaders\/GLTFLoader/.test(request)) {
+        return callback(null, {
+          root: 'THREE.GLTFLoader',
+          commonjs: 'three/examples/jsm/loaders/GLTFLoader',
+          commonjs2: 'three/examples/jsm/loaders/GLTFLoader',
+          amd: 'three/examples/jsm/loaders/GLTFLoader'
+        });
+      }
+      if (/three\/examples\/jsm\/loaders\/OBJLoader2/.test(request)) {
+        return callback(null, {
+          root: 'THREE.OBJLoader2',
+          commonjs: 'three/examples/jsm/loaders/OBJLoader2',
+          commonjs2: 'three/examples/jsm/loaders/OBJLoader2',
+          amd: 'three/examples/jsm/loaders/OBJLoader2'
+        });
+      }
       if (/\/static\/libs\/mapboxgl\/mapbox-gl-enhance/.test(request)) {
         return callback(null, {
           root: 'mapboxgl',
-          commonjs: '../../static/libs/mapboxgl/mapbox-gl-enhance.js',
-          commonjs2: '../../static/libs/mapboxgl/mapbox-gl-enhance.js',
-          amd: '../../static/libs/mapboxgl/mapbox-gl-enhance.js'
+          commonjs: '../static/libs/mapboxgl/mapbox-gl-enhance.js',
+          commonjs2: '../static/libs/mapboxgl/mapbox-gl-enhance.js',
+          amd: '../static/libs/mapboxgl/mapbox-gl-enhance.js'
         });
       }
       if (/\/static\/libs\/deckgl\/deck.gl/.test(request)) {
         return callback(null, {
           root: 'DeckGL',
-          commonjs: '../../static/libs/deckgl/deck.gl.min.js',
-          commonjs2: '../../static/libs/deckgl/deck.gl.min.js',
-          amd: '../../static/libs/deckgl/deck.gl.min.js'
+          commonjs: '../static/libs/deckgl/deck.gl.min.js',
+          commonjs2: '../static/libs/deckgl/deck.gl.min.js',
+          amd: '../static/libs/deckgl/deck.gl.min.js'
         });
       }
       if (/\/static\/libs\/echarts-layer\/EchartsLayer/.test(request)) {
         return callback(null, {
           root: 'EchartsLayer',
-          commonjs: '../../static/libs/echarts-layer/EchartsLayer.js',
-          commonjs2: '../../static/libs/echarts-layer/EchartsLayer.js',
-          amd: '../../static/libs/echarts-layer/EchartsLayer.js'
+          commonjs: '../static/libs/echarts-layer/EchartsLayer.js',
+          commonjs2: '../static/libs/echarts-layer/EchartsLayer.js',
+          amd: '../static/libs/echarts-layer/EchartsLayer.js'
         });
       }
       if (/\/static\/libs\/iclient-mapboxgl\/iclient-mapboxgl/.test(request)) {
         return callback(null, {
           root: 'SuperMap',
-          commonjs: '../../static/libs/iclient-mapboxgl/iclient-mapboxgl.min.js',
-          commonjs2: '../../static/libs/iclient-mapboxgl/iclient-mapboxgl.min.js',
-          amd: '../../static/libs/iclient-mapboxgl/iclient-mapboxgl.min.js'
+          commonjs: '../static/libs/iclient-mapboxgl/iclient-mapboxgl.min.js',
+          commonjs2: '../static/libs/iclient-mapboxgl/iclient-mapboxgl.min.js',
+          amd: '../static/libs/iclient-mapboxgl/iclient-mapboxgl.min.js'
         });
       }
       if (/\/static\/libs\/mapbox-gl-draw\/mapbox-gl-draw/.test(request)) {
         return callback(null, {
           root: 'MapboxDraw',
-          commonjs: '../../static/libs/mapbox-gl-draw/mapbox-gl-draw.js',
-          commonjs2: '../../static/libs/mapbox-gl-draw/mapbox-gl-draw.js',
-          amd: '../../static/libs/mapbox-gl-draw/mapbox-gl-draw.js'
+          commonjs: '../static/libs/mapbox-gl-draw/mapbox-gl-draw.js',
+          commonjs2: '../static/libs/mapbox-gl-draw/mapbox-gl-draw.js',
+          amd: '../static/libs/mapbox-gl-draw/mapbox-gl-draw.js'
         });
       }
       callback();
@@ -128,6 +161,10 @@ const webpackConfig = merge(baseWebpackConfig, {
     minimizer: []
   },
   plugins: [
+    new webpack.HashedModuleIdsPlugin({
+      hashFunction: 'sha256',
+      hashDigest: 'hex'
+    }),
     // http://vuejs.github.io/vue-loader/en/workflow/production.html
     new webpack.DefinePlugin({
       'process.env': env
@@ -140,14 +177,14 @@ const webpackConfig = merge(baseWebpackConfig, {
     new webpack.HashedModuleIdsPlugin(),
     new webpack.BannerPlugin(`
     ${pkg.name}.(${pkg.homepage})
-    Copyright© 2000 - 2020 SuperMap Software Co.Ltd
+    Copyright© 2000 - 2021 SuperMap Software Co.Ltd
     license: ${pkg.license}
     version: v${pkg.version}
    `),
     new CopyWebpackPlugin([
       {
-        from: path.resolve(__dirname, '../static/index.js'),
-        to: path.resolve(__dirname, '../dist/mapboxgl')
+        from: path.resolve(__dirname, '../static/mbgl-index.js'),
+        to: path.resolve(__dirname, '../dist/mapboxgl/index.js')
       }
     ])
   ]

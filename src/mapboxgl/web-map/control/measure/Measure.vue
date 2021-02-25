@@ -1,5 +1,5 @@
 <template>
-  <sm-card
+  <sm-collapse-card
     v-show="isShow"
     :icon-class="iconClass"
     :icon-position="position"
@@ -8,83 +8,92 @@
     :collapsed="collapsed"
     :background="background"
     :textColor="textColor"
+    :split-line="splitLine"
     class="sm-component-measure"
   >
-    <div class="sm-component-measure__panel" :style="[getBackgroundStyle, getTextColorStyle]">
-      <!-- <div class="sm-component-measure__panelTitle">
-          <span class="sm-component-measure__title">{{$t("measure.mapMeasure")}}</span>
-      </div>-->
+    <div class="sm-component-measure__panel" :style="headingTextColorStyle">
       <div class="sm-component-measure__panelContent">
         <span
           v-for="group in modeGroups"
           v-show="group.mode !== 'delete' || (!continueDraw && group.mode === 'delete')"
           :key="group.mode"
-          :style="activeMode === group.mode ? getColorStyle(0) : ''"
           :title="group.title"
-          class="sm-component-measure__modeIcon"
+          :style="collapseCardHeaderBgStyle"
+          :class="{'sm-component-measure__modeIcon': true, 'is-active':activeMode === group.mode}"
           @click="changeMeasureMode(group.mode)"
         >
           <i :class="group.iconClass"></i>
         </span>
-        <a-select
+        <sm-select
           v-show="getDistanceSelect"
           v-model="activeDistanceUnit"
           :placeholder="$t('measure.selectPlaceholder')"
           class="sm-component-measure__unit"
+          :style="getTextColorStyle"
           :get-popup-container="getPopupContainer"
           @change="updateUnit"
-          @dropdownVisibleChange="changeChosenStyle"
         >
-          <a-select-option v-for="(value, key, index) in getUnitOptions" :key="index" :title="value" :value="key">
+          <sm-select-option v-for="(value, key, index) in getUnitOptions" :key="index" :title="value" :value="key">
             {{ value }}
-          </a-select-option>
-        </a-select>
-        <a-select
+          </sm-select-option>
+        </sm-select>
+        <sm-select
           v-show="getAreaSelect"
           v-model="activeAreaUnit"
           :placeholder="$t('measure.selectPlaceholder')"
           class="sm-component-measure__unit"
+          :style="getTextColorStyle"
           :get-popup-container="getPopupContainer"
           @change="updateUnit"
-          @dropdownVisibleChange="changeChosenStyle"
         >
-          <a-select-option v-for="(value, key, index) in getUnitOptions" :key="index" :title="value" :value="key">
+          <sm-select-option v-for="(value, key, index) in getUnitOptions" :key="index" :title="value" :value="key">
             {{ value }}
-          </a-select-option>
-        </a-select>
+          </sm-select-option>
+        </sm-select>
         <div v-show="!showUnitSelect && activeMode" class="sm-component-measure__unit sm-component-measure__default">
           {{ getUnitLabel }}
         </div>
       </div>
-      <div v-show="getResult" class="sm-component-measure__calculateResult" :style="getTextColorStyle">
-        <div class="sm-component-measure__calcuTitle">{{ $t('measure.measureResult') }}</div>
-        <div class="sm-component-measure__result">{{ getResult }}</div>
+      <div v-show="getResult" class="sm-component-measure__calculateResult">
+        <div class="sm-component-measure__calcuTitle" :style="headingTextColorStyle">{{ $t('measure.measureResult') }}</div>
+        <div class="sm-component-measure__result" :style="getTextColorStyle">{{ getResult }}</div>
       </div>
     </div>
-  </sm-card>
+  </sm-collapse-card>
 </template>
 
 <script>
-import Theme from '../../../../common/_mixin/theme';
+import Theme from '../../../../common/_mixin/Theme';
 import Control from '../../../_mixin/control';
 import MapGetter from '../../../_mixin/map-getter';
-import Card from '../../../../common/_mixin/card';
+import Card from '../../../../common/_mixin/Card';
+import SmSelect from '../../../../common/select/Select';
+import SmSelectOption from '../../../../common/select/Option';
 import MeasureViewModel from './MeasureViewModel';
 import drawEvent from '../../../_types/draw-event';
 import uniqueId from 'lodash.uniqueid';
+import { setPopupArrowStyle } from '../../../../common/_utils/util';
 import '../../../../../static/libs/mapbox-gl-draw/mapbox-gl-draw.css';
 
 export default {
   name: 'SmMeasure',
+  components: {
+    SmSelect,
+    SmSelectOption
+  },
   mixins: [MapGetter, Control, Theme, Card],
   props: {
     collapsed: {
       type: Boolean, // 是否折叠
       default: true
     },
+    splitLine: {
+      type: Boolean,
+      default: false
+    },
     iconClass: {
       type: String,
-      default: 'sm-components-icons-measure'
+      default: 'sm-components-icon-measure'
     },
     headerName: {
       type: String
@@ -134,17 +143,17 @@ export default {
         {
           mode: 'draw_line_string',
           title: this.$t('measure.distance'),
-          iconClass: 'sm-components-icons-line-layer'
+          iconClass: 'sm-components-icon-line'
         },
         {
           mode: 'draw_polygon',
           title: this.$t('measure.area'),
-          iconClass: 'sm-components-icons-polygon-layer'
+          iconClass: 'sm-components-icon-ploygon'
         },
         {
           mode: 'delete',
           title: this.$t('measure.delete'),
-          iconClass: 'sm-components-icons-delete'
+          iconClass: 'sm-components-icon-delete'
         }
       ],
       activeMode: '',
@@ -181,6 +190,12 @@ export default {
     },
     getDistanceSelect() {
       return this.activeMode === 'draw_line_string' && this.showUnitSelect;
+    },
+    popupStyle() {
+      return {
+        background: this.tablePopupBgStyle.background,
+        color: this.getTextColorStyle.color
+      };
     }
   },
   watch: {
@@ -192,92 +207,50 @@ export default {
       this.activeAreaUnit = newVal;
       this.updateUnit(newVal);
     },
-    textColorsData: {
-      handler() {
-        this.changeSelectInputStyle();
-      }
-    },
-    backgroundData: {
-      handler() {
-        this.changeSelectInputStyle();
-      }
+    popupStyle(next) {
+      this.setPopupStyle(next);
     }
   },
   created() {
     this.componentName = uniqueId(this.$options.name);
-  },
-  mounted() {
-    this.changeSelectInputStyle();
-  },
-  beforeDestroy() {
-    this.$options.removed.call(this);
-  },
-  loaded() {
-    const mapTarget = this.getTargetName();
-    this.viewModel && this.resetData(mapTarget);
     this.viewModel = new MeasureViewModel({
-      map: this.map,
-      mapTarget,
       continueDraw: this.continueDraw,
       componentName: this.componentName
     });
-
-    // 控制显示结果的显示
-    this.viewModel.on('measure-finished', ({ result }) => {
-      this.result = result;
+    this.viewModel.on('measure-finished', this.measureFinishedFn);
+    this.viewModel.on('measure-start', this.measureStartFn);
+    this.viewModel.on('update-unit', this.updateUnitFn);
+  },
+  mounted() {
+    drawEvent.$on('draw-reset', this.drawResetFn);
+  },
+  beforeDestroy() {
+    this.viewModel.off('measure-finished', this.measureFinishedFn);
+    this.viewModel.off('measure-start', this.measureStartFn);
+    this.viewModel.off('update-unit', this.updateUnitFn);
+    drawEvent.$off('draw-reset', this.drawResetFn);
+  },
+  removed(map, target) {
+    drawEvent.$options.deleteDrawingState(target, this.componentName);
+    this.resetData(target);
+  },
+  methods: {
+    measureFinishedFn(e) {
+      this.result = e.result;
       this.measureFinished = true;
-    });
-    this.viewModel.on('measure-start', ({ result }) => {
+    },
+    measureStartFn(e) {
       this.result = '';
       this.measureFinished = false;
-    });
-    this.viewModel.on('update-unit', ({ result }) => {
-      this.result = result;
-    });
-    drawEvent.$on('draw-reset', ({ componentName }) => {
+    },
+    updateUnitFn(e) {
+      this.result = e.result;
+    },
+    drawResetFn({ componentName }) {
       if (componentName !== this.componentName) {
         this.activeMode = null;
         this.result = '';
       }
-    });
-  },
-  removed() {
-    this.activeMode = null;
-    this.result = '';
-    const targetName = this.getTargetName();
-    this.viewModel && this.viewModel.clear();
-    drawEvent.$options.deleteDrawingState(targetName, this.componentName);
-  },
-  methods: {
-    changeSelectInputStyle() {
-      const selectDoms = this.$el.querySelectorAll('.ant-select-selection');
-      for (let selectDom of selectDoms) {
-        if (selectDom) {
-          selectDom.style.borderColor = this.getTextColor;
-          selectDom.style.color = this.getTextColor;
-          selectDom.style.backgroundColor = this.getBackground;
-        }
-      }
-    },
-    changeChosenStyle(visible) {
-      setTimeout(() => {
-        const optionList = this.$el.querySelectorAll('.ant-select-dropdown-menu-item');
-        const dropdownDoms = this.$el.querySelectorAll('.ant-select-dropdown');
-        for (let item of optionList) {
-          if (item.classList.contains('ant-select-dropdown-menu-item-selected')) {
-            item.style.color = this.getColorStyle(0).color;
-            item.style.backgroundColor = this.getBackground;
-          } else {
-            item.style.color = this.getTextColor;
-            item.style.backgroundColor = 'transparent';
-          }
-        }
-        for (let dropdownDom of dropdownDoms) {
-          if (dropdownDom) {
-            dropdownDom.style.backgroundColor = this.getBackground;
-          }
-        }
-      }, 0);
     },
     // 切换量算模式
     changeMeasureMode(mode) {
@@ -299,7 +272,7 @@ export default {
             return;
           }
           if (this.activeMode !== mode || !this.continueDraw) {
-            this.viewModel.openDraw(mode, activeUnit);
+            this.viewModel.openDraw(mode, activeUnit, this.setPopupStyle);
             this.activeMode = mode;
             this.continueDraw && drawEvent.$emit('draw-reset', { componentName: this.componentName });
           } else {
@@ -325,14 +298,23 @@ export default {
     resetData(mapTarget) {
       this.activeMode = null;
       this.result = '';
-      const mapDom = document.querySelector(`#${mapTarget}`);
-      if (mapDom && mapDom.classList && !!mapDom.classList.length) {
-        mapDom.classList.remove('mouse-add');
-      }
+      this.continueDraw && drawEvent.$emit('draw-reset', { componentName: this.componentName });
     },
     // 提供对外方法：清空features
     clear() {
-      this.$options.removed.call(this);
+      this.activeMode = null;
+      this.result = '';
+      this.viewModel && this.viewModel.clearAllFeatures();
+    },
+    setPopupStyle(styleData = this.popupStyle) {
+      const popupContentList = document.querySelectorAll('.sm-component-measure__popup .mapboxgl-popup-content');
+      if (popupContentList) {
+        popupContentList.forEach(item => {
+          item.style.color = styleData.color;
+          item.style.background = styleData.background;
+        });
+      }
+      setPopupArrowStyle(styleData.background);
     }
   }
 };

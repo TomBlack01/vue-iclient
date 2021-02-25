@@ -28,7 +28,9 @@ export default {
     unsupportedVideoAddress: '视频地址不合法',
     unavailableVideo: '此视频暂无法播放，请稍后再试',
     mapNotLoaded: '关联的地图尚未加载完整，请稍后',
-    unassociatedMap: '您需要配置关联地图！'
+    unassociatedMap: '您需要配置关联地图！',
+    videojs: '请引入video.js插件: https://github.com/videojs/video.js； 当播放rtmp时，安装flash相关插件：https://github.com/videojs/videojs-flash',
+    flvPlayer: '请引入flv相关插件: https://github.com/bilibili/flv.js, https://github.com/mister-ben/videojs-flvjs'
   },
   success: {},
   info: {
@@ -79,6 +81,7 @@ export default {
     crsNotSupport: '不支持当前地图的坐标系！',
     TileMatrixSetNotSuppport: '不支持传入的 TileMatrixSet！',
     getLayerInfoFailed: '获取图层信息失败！',
+    getThemeInfoFailed: '获取图层样式信息失败！',
     crsnotsupport: '不支持的坐标系！',
     baiduMapNotSupport: '暂不支持加载百度地图！',
     sampleDataNotSupport: '暂不支持加载示例数据！',
@@ -93,7 +96,7 @@ export default {
   },
   measure: {
     mapMeasure: '量算',
-    measureResult: '测量结果',
+    measureResult: '测量结果：',
     distance: '距离',
     area: '面积',
     delete: '清空',
@@ -130,7 +133,8 @@ export default {
     seviceNotSupport: '此服务不支持查询！'
   },
   identify: {
-    layerNotExit: "地图上不存在该图层: '{layer}'"
+    layerNotExit: "地图上不存在该图层: '{layer}'",
+    noData: '无数据'
   },
   openFile: {
     fileSizeExceeded: '文件大小超限！文件大小不得超过 10M！',
@@ -207,7 +211,6 @@ export default {
   },
   tdtRoute: {
     title: '路线',
-    clearRoute: '清除路线',
     pleaseEnterStartPoint: '请输入起点',
     pleaseEnterEndPoint: '请输入终点',
     search: '搜索',

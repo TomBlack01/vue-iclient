@@ -1,4 +1,4 @@
-/* Copyright© 2000 - 2020 SuperMap Software Co.Ltd. All rights reserved.
+/* Copyright© 2000 - 2021 SuperMap Software Co.Ltd. All rights reserved.
  * This program are made available under the terms of the Apache License, Version 2.0
  * which accompanies this distribution and is available at http://www.apache.org/licenses/LICENSE-2.0.html. */
 import mapboxgl from '../../../static/libs/mapboxgl/mapbox-gl-enhance';
@@ -12,8 +12,10 @@ import EchartsLayer from '../../../static/libs/echarts-layer/EchartsLayer';
 import cloneDeep from 'lodash.clonedeep';
 import { geti18n } from '../../common/_lang';
 import WebMapBase from '../../common/web-map/WebMapBase';
+import { getColorWithOpacity } from '../../common/_utils/util';
+import { getProjection, registerProjection, toEpsgCode } from '../../common/_utils/epsg-define';
 import proj4 from 'proj4';
-
+const WORLD_WIDTH = 360;
 // 迁徙图最大支持要素数量
 /**
  * @class WebMapViewModel
@@ -28,6 +30,8 @@ import proj4 from 'proj4';
  * @param {String} [options.tiandituKey] - 用于访问天地图的服务。当设置 `id` 时有效。
  * @param {boolean} [options.withCredentials=false] - 请求是否携带 cookie。当设置 `id` 时有效。
  * @param {boolean} [options.excludePortalProxyUrl] - server 传递过来的 URL 是否带有代理。当设置 `id` 时有效。
+ * @param {boolean} [options.ignoreBaseProjection = 'false'] - 是否忽略底图坐标系和叠加图层坐标系不一致。
+ * @param {String} [options.iportalServiceProxyUrlPrefix] - iportal的代理服务地址前缀。
  * @fires WebMapViewModel#mapinitialized
  * @fires WebMapViewModel#getmapinfofailed
  * @fires WebMapViewModel#getlayerdatasourcefailed
@@ -44,10 +48,14 @@ interface webMapOptions {
   isSuperMapOnline?: boolean;
   center?: number[];
   zoom?: number;
+  proxy?: boolean | string;
+  iportalServiceProxyUrlPrefix?: string;
+  checkSameLayer?: boolean;
 }
 interface mapOptions {
-  center?: [number, number] | mapboxglTypes.LngLatLike | { lon: number; lat: number };
+  center?: [number, number] | mapboxglTypes.LngLatLike | { lon: number; lat: number } | number[];
   zoom?: number;
+  bounds?: mapboxglTypes.LngLatBoundsLike;
   maxBounds?: [[number, number], [number, number]] | mapboxglTypes.LngLatBoundsLike;
   minZoom?: number;
   maxZoom?: number;
@@ -55,6 +63,7 @@ interface mapOptions {
   bearing?: number;
   pitch?: number;
   style?: any;
+  rasterTileSize?: number;
   container?: string;
   crs: string;
 }
@@ -64,13 +73,19 @@ type layerType = 'POINT' | 'LINE' | 'POLYGON';
 export default class WebMapViewModel extends WebMapBase {
   map: mapboxglTypes.Map;
 
-  center: [number, number] | mapboxglTypes.LngLatLike | { lon: number; lat: number };
+  center: [number, number] | mapboxglTypes.LngLatLike | { lon: number; lat: number } | number[];
+
+  bounds: mapboxglTypes.LngLatBoundsLike;
 
   bearing: number;
 
   pitch: number;
 
+  rasterTileSize: number;
+
   layerFilter: Function;
+
+  baseLayerProxy: string | boolean;
 
   private _sourceListModel: SourceListModel;
 
@@ -80,22 +95,34 @@ export default class WebMapViewModel extends WebMapBase {
 
   private _handleDataflowFeaturesCallback: Function;
 
+  private _initDataflowLayerCallback: Function;
+
   private _dataflowService: any;
 
   private _unprojectProjection: string;
 
   private _cacheLayerId: Array<string> = [];
 
+  private _layerTimerList: Array<any> = [];
+
+  private checkSameLayer: boolean;
+
   constructor(
-    id,
+    id: string | number | object,
     options: webMapOptions = {},
     // @ts-ignore fix-mapoptions
     mapOptions: mapOptions = { style: { version: 8, sources: {}, layers: [] } },
     map?: mapboxglTypes.Map,
-    layerFilter: Function = function () { return true }
+    layerFilter: Function = function () {
+      return true;
+    }
   ) {
     super(id, options, mapOptions);
-    this.mapId = id;
+    if (typeof id === 'string' || typeof id === 'number') {
+      this.mapId = id;
+    } else if (id !== null && typeof id === 'object') {
+      this.webMapInfo = id;
+    }
     if (!this.mapId && !mapOptions.center && !mapOptions.zoom) {
       mapOptions.center = [0, 0];
       mapOptions.zoom = 0;
@@ -104,9 +131,12 @@ export default class WebMapViewModel extends WebMapBase {
       this.center = mapOptions.center;
     }
     this.zoom = mapOptions.zoom;
+    this.bounds = mapOptions.bounds;
     this.bearing = mapOptions.bearing;
     this.pitch = mapOptions.pitch;
+    this.rasterTileSize = mapOptions.rasterTileSize || 256;
     this.layerFilter = layerFilter;
+    this.checkSameLayer = options.checkSameLayer;
     this._legendList = {};
     if (map) {
       this.map = map;
@@ -117,9 +147,16 @@ export default class WebMapViewModel extends WebMapBase {
     }
   }
 
-  public resize(): void {
+  public resize(keepBounds = false): void {
     this.map && this.map.resize();
     this.echartsLayerResize();
+    let mapContainerStyle = window.getComputedStyle(document.getElementById(this.target));
+    if (keepBounds && this.map && this.bounds && mapContainerStyle) {
+      let zoom = this._getResizedZoom(this.bounds, mapContainerStyle);
+      if (zoom !== this.map.getZoom()) {
+        this.map && this.map.setZoom(zoom);
+      }
+    }
   }
 
   public setCrs(crs): void {
@@ -133,7 +170,10 @@ export default class WebMapViewModel extends WebMapBase {
   public setCenter(center): void {
     if (this.map && this.centerValid(center)) {
       this.mapOptions.center = center;
-      this.map.setCenter(center);
+      let { lng, lat } = this.map.getCenter();
+      if (center[0] !== +lng.toFixed(4) || center[1] !== +lat.toFixed(4)) {
+        this.map.setCenter(center, { from: 'setCenter' });
+      }
     }
   }
 
@@ -147,14 +187,18 @@ export default class WebMapViewModel extends WebMapBase {
   public setBearing(bearing): void {
     if (this.map) {
       this.mapOptions.bearing = bearing;
-      (bearing || bearing === 0) && this.map.setBearing(bearing);
+      if (bearing !== +this.map.getBearing().toFixed(2)) {
+        (bearing || bearing === 0) && this.map.setBearing(bearing);
+      }
     }
   }
 
   public setPitch(pitch): void {
     if (this.map) {
       this.mapOptions.pitch = pitch;
-      (pitch || pitch === 0) && this.map.setPitch(pitch);
+      if (pitch !== +this.map.getPitch().toFixed(2)) {
+        (pitch || pitch === 0) && this.map.setPitch(pitch);
+      }
     }
   }
 
@@ -162,6 +206,21 @@ export default class WebMapViewModel extends WebMapBase {
     if (this.map) {
       this.mapOptions.style = style;
       style && this.map.setStyle(style);
+    }
+  }
+
+  public setRasterTileSize(tileSize) {
+    if (this.map) {
+      if (tileSize <= 0) {
+        return;
+      }
+      let sources = this.map.getStyle().sources;
+      Object.keys(sources).forEach(sourceId => {
+        // @ts-ignore
+        if (sources[sourceId].type === 'raster' && sources[sourceId].rasterSource === 'iserver') {
+          this._updateRasterSource(sourceId, { tileSize });
+        }
+      });
     }
   }
 
@@ -190,21 +249,12 @@ export default class WebMapViewModel extends WebMapBase {
 
   _getMapInfo(mapInfo, _taskID): void {
     let { projection } = mapInfo;
-    let epsgCode = projection.split(':')[1];
-    if (!epsgCode) {
-      this.baseProjection = this.getEpsgInfoFromWKT(projection);
-    } else {
-      this.baseProjection = projection;
-    }
+    this.baseProjection = this._defineProj4(projection);
 
     if (mapboxgl.CRS.get(this.baseProjection)) {
-      if (!['EPSG:4326', 'EPSG:3857'].includes(this.baseProjection)) {
-        this._defineProj4(this.baseProjection.split(':')[1]);
-      }
-
       if (this.map) {
         // @ts-ignore
-        if (this.map.getCRS().epsgCode !== this.baseProjection) {
+        if (this.map.getCRS().epsgCode !== this.baseProjection && !this.ignoreBaseProjection) {
           this.triggerEvent('projectionIsNotMatch', {});
           return;
         }
@@ -222,7 +272,8 @@ export default class WebMapViewModel extends WebMapBase {
 
   _handleLayerInfo(mapInfo, _taskID): void {
     mapInfo = this._setLayerID(mapInfo);
-    const { layers, baseLayer } = mapInfo;
+    this._layers = [];
+    const { layers, baseLayer, grid } = mapInfo;
 
     typeof this.layerFilter === 'function' && this.layerFilter(baseLayer) && this._initBaseLayer(mapInfo);
     if (!layers || layers.length === 0) {
@@ -230,13 +281,39 @@ export default class WebMapViewModel extends WebMapBase {
     } else {
       this._initOverlayLayers(layers, _taskID);
     }
+    if (grid && grid.graticule) {
+      this._initGraticuleLayer(grid.graticule);
+    }
   }
 
   _createMap(mapInfo?): void {
     if (!mapInfo) {
       this.mapOptions.container = this.target;
+      if (!this.mapOptions.transformRequest) {
+        this.mapOptions.transformRequest = (url: string, resourceType: string) => {
+          const urlParam = { url };
+          let proxy = '';
+          if (typeof this.proxy === 'string') {
+            let proxyType = 'data';
+            if (resourceType === 'Tile') {
+              proxyType = 'image';
+            }
+            proxy = this.webMapService.handleProxy(proxyType);
+          }
+          return {
+            url: proxy ? +`${proxy}${encodeURIComponent(url)}` : url,
+            credentials: this.webMapService.handleWithCredentials(proxy, url, this.withCredentials || false)
+              ? 'include'
+              : 'omit'
+          };
+        };
+      }
       setTimeout(() => {
-        this.map = new mapboxgl.Map(this.mapOptions);
+        let fadeDuration = 0;
+        if (this.mapOptions.hasOwnProperty('fadeDuration')) {
+          fadeDuration = this.mapOptions.fadeDuration;
+        }
+        this.map = new mapboxgl.Map({ ...this.mapOptions, fadeDuration });
         this.map.on('load', () => {
           this.triggerEvent('addlayerssucceeded', {
             map: this.map,
@@ -253,18 +330,52 @@ export default class WebMapViewModel extends WebMapBase {
     let center = this._getMapCenter(mapInfo);
     // zoom
     let zoom = mapInfo.level || 0;
-    // @ts-ignore
-    const zoomBase = +Math.log2(
-      this._getResolution(mapboxgl.CRS.get(this.baseProjection).getExtent()) / this._getResolution(mapInfo.extent)
-    ).toFixed(2);
-    zoom += zoomBase;
+    let zoomBase = 0;
+    let { interactive, bounds, minZoom, maxZoom } = this.mapOptions;
+    if (isNaN(minZoom)) {
+      minZoom = mapInfo.minScale
+        ? this._transformScaleToZoom(mapInfo.minScale, mapboxgl.CRS.get(this.baseProjection))
+        : 0;
+    }
+    if (isNaN(maxZoom)) {
+      maxZoom = mapInfo.maxScale
+        ? this._transformScaleToZoom(mapInfo.maxScale, mapboxgl.CRS.get(this.baseProjection))
+        : 22;
+    }
+    if (mapInfo.visibleExtent && mapInfo.visibleExtent.length === 4 && !bounds) {
+      bounds = [
+        this._unproject([mapInfo.visibleExtent[0], mapInfo.visibleExtent[1]]),
+        this._unproject([mapInfo.visibleExtent[2], mapInfo.visibleExtent[3]])
+      ];
+    }
+    if (minZoom > maxZoom) {
+      [minZoom, maxZoom] = [maxZoom, minZoom];
+    }
+    if (!bounds) {
+      if (mapInfo.minScale && mapInfo.maxScale) {
+        zoomBase = Math.min(
+          this._transformScaleToZoom(mapInfo.minScale, mapboxgl.CRS.get(this.baseProjection)),
+          this._transformScaleToZoom(mapInfo.maxScale, mapboxgl.CRS.get(this.baseProjection))
+        );
+      } else {
+        zoomBase = +Math.log2(
+          this._getResolution(mapboxgl.CRS.get(this.baseProjection).getExtent()) / this._getResolution(mapInfo.extent)
+        ).toFixed(2);
+      }
+      zoom += zoomBase;
+    }
+
     // 初始化 map
     this.map = new mapboxgl.Map({
       container: this.target,
       center: this.center || center,
       zoom: this.zoom || zoom,
+      minZoom,
+      maxZoom,
       bearing: this.bearing || 0,
       pitch: this.pitch || 0,
+      bounds,
+      interactive: interactive === void 0 ? true : interactive,
       style: {
         version: 8,
         sources: {},
@@ -276,13 +387,22 @@ export default class WebMapViewModel extends WebMapBase {
       renderWorldCopies: false,
       preserveDrawingBuffer: this.mapOptions.preserveDrawingBuffer || false,
       transformRequest: (url, resourceType) => {
-        if (resourceType === 'Tile' && this.isSuperMapOnline && url.indexOf('http://') === 0) {
-          url = `https://www.supermapol.com/apps/viewer/getUrlResource.png?url=${encodeURIComponent(url)}`;
+        if (resourceType === 'Tile') {
+          if (this.isSuperMapOnline && url.indexOf('http://') === 0) {
+            url = `https://www.supermapol.com/apps/viewer/getUrlResource.png?url=${encodeURIComponent(url)}`;
+          }
+          if (this.webMapService.isIportalResourceUrl(url)) {
+            url = this.webMapService.handleParentRes(url);
+          }
+          const proxy = this.webMapService.handleProxy('image');
+          return {
+            url: url,
+            credentials: this.webMapService.handleWithCredentials(proxy, url, false) ? 'include' : 'omit'
+          };
         }
-        return {
-          url: url
-        };
-      }
+        return { url };
+      },
+      fadeDuration: 0
     });
     /**
      * @description Map 初始化成功。
@@ -292,6 +412,9 @@ export default class WebMapViewModel extends WebMapBase {
 
   private _createMVTBaseLayer(layerInfo) {
     let url = layerInfo.dataSource.url;
+    if (url.indexOf('/restjsr/') > -1) {
+      url += '/style.json';
+    }
     // @ts-ignore
     this.map.addStyle(url);
   }
@@ -301,12 +424,15 @@ export default class WebMapViewModel extends WebMapBase {
     let layerType = this.getBaseLayerType(layerInfo);
     let mapUrls = this.getMapurls();
     let url: string;
+    this.baseLayerProxy = this.webMapService.handleProxy('image');
 
     switch (layerType) {
       case 'TIANDITU':
+        this.baseLayerProxy = null;
         this._createTiandituLayer(mapInfo);
         break;
       case 'BING':
+        this.baseLayerProxy = null;
         this._createBingLayer(layerInfo.layerID || layerInfo.name);
         break;
       case 'WMS':
@@ -354,19 +480,41 @@ export default class WebMapViewModel extends WebMapBase {
           });
           return;
         }
+
+        if (layer.visibleScale) {
+          let { minScale, maxScale } = layer.visibleScale;
+          layer.minzoom = Math.max(this._transformScaleToZoom(minScale), 0);
+          layer.maxzoom = Math.min(24, this._transformScaleToZoom(maxScale) + 0.0000001);
+        }
+
         if (type === 'tile') {
           this._initBaseLayer(layer);
           this._addLayerSucceeded();
+          if (!!layer.autoUpdateTime) {
+            this._layerTimerList.push(
+              setInterval(() => {
+                this._initBaseLayer(layer);
+              }, layer.autoUpdateTime)
+            );
+          }
         } else {
           this.getLayerFeatures(layer, _taskID, type);
+          if (!!layer.autoUpdateTime) {
+            this._layerTimerList.push(
+              setInterval(() => {
+                this.getLayerFeatures(layer, _taskID, type);
+              }, layer.autoUpdateTime)
+            );
+          }
         }
       }, this);
     }
   }
 
-  _initOverlayLayer(layerInfo: any, features?: any) {
-    let { layerType, visible, style, featureType, labelStyle, projection } = layerInfo;
+  _initOverlayLayer(layerInfo: any, features: any = [], mergeByField?: string) {
+    let { layerID, layerType, visible, style, featureType, labelStyle, projection } = layerInfo;
     layerInfo.visible = visible ? 'visible' : 'none';
+    features = this.mergeFeatures(layerID, features, mergeByField);
     if (layerType === 'restMap') {
       this._createRestMapLayer(features, layerInfo);
       return;
@@ -378,25 +526,16 @@ export default class WebMapViewModel extends WebMapBase {
 
     // mbgl 目前不能处理 geojson 复杂面情况
     // mbgl isssue https://github.com/mapbox/mapbox-gl-js/issues/7023
-    if (features && features[0] && features[0].geometry.type === 'Polygon') {
+    if (features && features[0] && features[0].geometry && features[0].geometry.type === 'Polygon') {
       features = handleMultyPolygon(features);
     }
 
-    if (features && projection && (projection !== this.baseProjection || projection === 'EPSG:3857')) {
-      let epsgCode = projection.split(':')[1];
-      if (!epsgCode) {
-        return;
-      }
-      this._unprojectProjection = projection;
-
-      if (projection !== 'EPSG:3857') {
-        this._defineProj4(epsgCode);
-      }
-
+    if (features && projection && (projection !== this.baseProjection || projection === 'EPSG:3857') && (layerInfo.dataSource && layerInfo.dataSource.type !== 'REST_DATA')) {
+      this._unprojectProjection = this._defineProj4(projection);
       features = this.transformFeatures(features);
     }
 
-    this.handleLayerFeatures(features, layerInfo);
+    features = this.handleLayerFeatures(features, layerInfo);
 
     if (layerType === 'VECTOR') {
       if (featureType === 'POINT') {
@@ -428,8 +567,64 @@ export default class WebMapViewModel extends WebMapBase {
     }
     if (labelStyle && labelStyle.labelField && layerType !== 'DATAFLOW_POINT_TRACK') {
       // 存在标签专题图
-      this._addLabelLayer(layerInfo, features);
+      this._addLabelLayer(layerInfo, features, false);
     }
+  }
+
+  _initGraticuleLayer(graticuleInfo: any) {
+    const options = this._createGraticuleOptions(graticuleInfo);
+    const graticuleLayers = new mapboxgl.supermap.GraticuleLayer(options);
+    this.map.addLayer(graticuleLayers);
+    this._setGraticuleDash(graticuleInfo.lineDash, graticuleLayers);
+  }
+
+  private _createGraticuleOptions(graticuleInfo) {
+    if (!graticuleInfo) {
+      return null;
+    }
+    let { strokeColor, lineDash, strokeWidth, extent, interval, lonLabelStyle, latLabelStyle } = graticuleInfo;
+    const strokeStyle = {
+      lineColor: strokeColor,
+      lindDasharray: lineDash,
+      lineWidth: strokeWidth
+    };
+    lonLabelStyle = {
+      textFont: lonLabelStyle.fontFamily.split(','),
+      textSize: lonLabelStyle.fontSize,
+      textAnchor: latLabelStyle.textBaseline,
+      textColor: lonLabelStyle.fill,
+      textHaloColor: lonLabelStyle.outlineColor,
+      textHaloWidth: lonLabelStyle.outlineWidth
+    };
+    latLabelStyle = {
+      textFont: latLabelStyle.fontFamily.split(','),
+      textSize: latLabelStyle.fontSize,
+      textAnchor: latLabelStyle.textBaseline,
+      textColor: latLabelStyle.fill,
+      textHaloColor: latLabelStyle.outlineColor,
+      textHaloWidth: latLabelStyle.outlineWidth
+    };
+    // @ts-ignore
+    extent = extent || this.map.getCRS().extent;
+    extent = [this._unproject([extent[0], extent[1]]), this._unproject([extent[2], extent[3]])];
+    return {
+      minZoom: 1,
+      strokeStyle,
+      extent,
+      interval: interval && interval[0],
+      lngLabelStyle: lonLabelStyle,
+      latLabelStyle
+    };
+  }
+
+  private _setGraticuleDash(lindDasharray, graticuleLayers) {
+    this.map.on('zoomend', () => {
+      if (this.map.getZoom() < 3) {
+        graticuleLayers.setStrokeStyle({ lindDasharray: [0.1, 3] });
+      } else {
+        graticuleLayers.setStrokeStyle({ lindDasharray });
+      }
+    });
   }
 
   private _createTiandituLayer(mapInfo: any): void {
@@ -443,13 +638,17 @@ export default class WebMapViewModel extends WebMapBase {
   }
 
   private _createWMTSLayer(layerInfo): void {
-    let wmtsUrl = this._getWMTSUrl(layerInfo);
     this.webMapService
-      .getWmtsInfo(layerInfo)
+      // @ts-ignore
+      .getWmtsInfo(layerInfo, this.map.getCRS().epsgCode)
       .then(
         (result: any) => {
           const layerId = layerInfo.layerID || layerInfo.name;
-          result.isMatched && this._addBaselayer([wmtsUrl], layerId, layerInfo.visible, 0, result.matchMaxZoom);
+          if (result.isMatched) {
+            let wmtsUrl = this._getWMTSUrl(Object.assign({}, layerInfo, result));
+
+            this._addBaselayer([wmtsUrl], layerId, layerInfo.visible, 0, result.matchMaxZoom, false, result.bounds);
+          }
         },
         error => {
           throw new Error(error);
@@ -513,66 +712,118 @@ export default class WebMapViewModel extends WebMapBase {
   private _createDynamicTiledLayer(layerInfo: any): void {
     let url = layerInfo.url;
     const layerId = layerInfo.layerID || layerInfo.name;
-    this._addBaselayer([url], layerId, layerInfo.visible, null, null, true);
+    const { minzoom, maxzoom } = layerInfo;
+    this._addBaselayer([url], layerId, layerInfo.visible, minzoom, maxzoom, true);
   }
 
   private _createWMSLayer(layerInfo: any): void {
-    let WMSUrl = this._getWMSUrl(layerInfo);
-    const layerId = layerInfo.layerID || layerInfo.name;
-    this._addBaselayer([WMSUrl], layerId, layerInfo.visible);
+    this.webMapService
+      // @ts-ignore
+      .getWmsInfo(layerInfo)
+      .then(
+        (result: any) => {
+          const layerId = layerInfo.layerID || layerInfo.name;
+          if (result) {
+            let wmsUrl = this._getWMSUrl(layerInfo, result.version);
+
+            this._addBaselayer([wmsUrl], layerId, layerInfo.visible);
+          }
+        },
+        error => {
+          throw new Error(error);
+        }
+      )
+      .catch(error => {
+        /**
+         * @event WebMapViewModel#getmapinfofailed
+         * @description 获取地图信息失败。
+         * @property {Object} error - 失败原因。
+         */
+        this.triggerEvent('getmapinfofailed', { error });
+      });
   }
 
   private _createVectorLayer(layerInfo: any, features: any): void {
-    let style = layerInfo.style;
     let type = layerInfo.featureType;
-    let layerID = layerInfo.layerID;
-    let visible = layerInfo.visible;
-    let layerStyle = {
-      style: this._transformStyleToMapBoxGl(style, type),
-      layout: {
-        visibility: visible
-      }
+    const { layerID, minzoom, maxzoom, style, visible } = layerInfo;
+    const layerSource = this.map.getSource(layerID);
+    const sourceData: GeoJSON.FeatureCollection = {
+      type: 'FeatureCollection',
+      features: features
     };
-    let source: mapboxglTypes.GeoJSONSourceRaw = {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: features
+    if (!layerSource) {
+      const source: mapboxglTypes.GeoJSONSourceRaw = {
+        type: 'geojson',
+        data: sourceData
+      };
+      this.map.addSource(layerID, source);
+    } else {
+      // @ts-ignore
+      layerSource.setData(sourceData);
+    }
+    let styleArr = Array.isArray(style) ? style : [style];
+    if (styleArr.length === 2) {
+      // 道路
+      if (styleArr[0].lineDash === 'solid' && styleArr[1].lineDash === 'solid') {
+        styleArr[0].strokeWidth = styleArr[1].strokeWidth;
+        styleArr[1].strokeWidth = styleArr[1].strokeWidth - 2;
       }
-    };
-    this._addOverlayToMap(type, source, layerID, layerStyle);
+      // 铁路
+      if (styleArr[0].lineDash === 'solid' && styleArr[1].lineDash === 'dash') {
+        styleArr[0].strokeWidth = styleArr[1].strokeWidth;
+        styleArr[1].strokeWidth = styleArr[1].strokeWidth * 0.5;
+        styleArr[1].lineDash = 'dashrailway';
+      }
+    }
+    styleArr.forEach((element, index) => {
+      let layerStyle = {
+        style: this._transformStyleToMapBoxGl(element, type),
+        layout: {
+          visibility: visible
+        }
+      };
+      const newLayerID = index === 0 ? layerID : `${layerID}-additional-${index}`;
+      this._addOverlayToMap(type, layerID, newLayerID, layerStyle, minzoom, maxzoom);
+    });
     // 如果面有边框
     type === 'POLYGON' &&
       style.strokeColor &&
-      this._addStrokeLineForPoly(style, layerID, layerID + '-strokeLine', visible);
+      this._addStrokeLineForPoly(style, layerID, layerID + '-strokeLine', visible, minzoom, maxzoom);
   }
 
-  private _getWMSUrl(mapInfo: any): string {
+  private _getWMSUrl(mapInfo: any, version = '1.1.1'): string {
     let url = mapInfo.url;
     url = url.split('?')[0];
-    let strArr = url.split('/');
-    let options = {
+    let options: any = {
       service: 'WMS',
       request: 'GetMap',
-      layers: strArr[strArr.length - 1],
+      layers:
+        mapInfo.layers !== null && typeof mapInfo.layers === 'object'
+          ? mapInfo.layers.join(',')
+          : mapInfo.layers || '0', // 如果是多个图层，用逗号分隔
       styles: '',
       format: 'image/png',
       transparent: 'true',
-      version: '1.1.1',
+      version,
       width: 256,
-      height: 256,
-      srs: this.baseProjection
+      height: 256
     };
-    let bbox = this.baseProjection === 'EPSG:4326' ? '{bbox-epsg-4326}' : '{bbox-epsg-3857}';
-    url += this._getParamString(options, url) + `&bbox=${bbox}`;
+    if (version === '1.3.0') {
+      options.crs = this.baseProjection;
+    } else {
+      options.srs = this.baseProjection;
+    }
+    url += `${this._getParamString(options, url)}&bbox={bbox-epsg-3857}`;
     return url;
   }
 
   private _setLayerID(mapInfo): Array<object> {
     let sumInfo: object = {};
-    const { baseLayer, layers } = mapInfo;
-    let baseInfo = this._generateUniqueLayerId(baseLayer.name, 0);
-    baseLayer.name = baseInfo.newId;
+    const { baseLayer, layers = [] } = mapInfo;
+    if (!this.checkSameLayer) {
+      let baseInfo = this._generateUniqueLayerId(baseLayer.name, 0);
+      baseLayer.name = baseInfo.newId;
+    }
     const layerNames = layers.map(layer => layer.name);
     const _layers: Array<object> = layers.map((layer, index) => {
       if (!(layer.name in sumInfo)) {
@@ -584,9 +835,11 @@ export default class WebMapViewModel extends WebMapBase {
         sumInfo[layer.name] = sumInfo[layer.name] + 1;
       }
       let layerID = !!sumInfo[layer.name] ? `${layer.name}-${sumInfo[layer.name]}` : layer.name;
-      let { newId, newIndex } = this._generateUniqueLayerId(layerID, sumInfo[layer.name]);
-      sumInfo[layer.name] = newIndex;
-      layerID = newId;
+      if (!this.checkSameLayer || layer.layerType !== 'raster') {
+        let { newId, newIndex } = this._generateUniqueLayerId(layerID, sumInfo[layer.name]);
+        sumInfo[layer.name] = newIndex;
+        layerID = newId;
+      }
       return Object.assign(layer, { layerID });
     });
     mapInfo.layers = _layers;
@@ -609,6 +862,22 @@ export default class WebMapViewModel extends WebMapBase {
     }
   }
 
+  private _getResizedZoom(bounds, mapContainerStyle, tileSize = 512, worldWidth = WORLD_WIDTH) {
+    let { width, height } = mapContainerStyle;
+    let lngArcLength = Math.abs(bounds.getEast() - bounds.getWest());
+    let latArcLength = Math.abs(this._getBoundsRadian(bounds.getSouth()) - this._getBoundsRadian(bounds.getNorth()));
+    let lngResizeZoom = +Math.log2(worldWidth / ((lngArcLength / parseInt(width)) * tileSize)).toFixed(2);
+    let latResizeZoom = +Math.log2(worldWidth / ((latArcLength / parseInt(height)) * tileSize)).toFixed(2);
+    if (lngResizeZoom <= latResizeZoom) {
+      return lngResizeZoom;
+    }
+    return latResizeZoom;
+  }
+
+  private _getBoundsRadian(point) {
+    return (180 / Math.PI) * Math.log(Math.tan(Math.PI / 4 + (point * Math.PI) / 360));
+  }
+
   _createRestMapLayer(restMaps, layer) {
     restMaps.forEach(restMapInfo => {
       layer = this.getRestMapLayerInfo(restMapInfo, layer);
@@ -625,30 +894,38 @@ export default class WebMapViewModel extends WebMapBase {
   private _createDataflowLayer(layerInfo) {
     let dataflowService = new mapboxgl.supermap.DataFlowService(layerInfo.wsUrl).initSubscribe();
     this._handleDataflowFeaturesCallback = this._handleDataflowFeatures.bind(this, layerInfo);
+    this._initDataflowLayerCallback = this._initDataflowLayer.bind(this, layerInfo);
+    dataflowService.on('subscribesucceeded', this._initDataflowLayerCallback);
     dataflowService.on('messageSucceeded', this._handleDataflowFeaturesCallback);
     this._dataflowService = dataflowService;
   }
-
+  private _initDataflowLayer(layerInfo) {
+    this._addLayerSucceeded();
+  }
   private _handleDataflowFeatures(layerInfo, e) {
-    let features = JSON.parse(e.data);
+    let features = [JSON.parse(e.data)];
     // this.transformFeatures([features]); // TODO 坐标系
     this.triggerEvent('dataflowfeatureupdated', {
       features,
       identifyField: layerInfo.identifyField,
       layerID: layerInfo.layerID
     });
+
+    if (layerInfo.projection === 'EPSG:3857') {
+      features = this.transformFeatures(features);
+    }
     if (layerInfo.filterCondition) {
       //过滤条件
       let condition = this.replaceFilterCharacter(layerInfo.filterCondition);
       let sql = 'select * from json where (' + condition + ')';
       let filterResult = window['jsonsql'].query(sql, {
-        attributes: features.properties
+        attributes: features[0].properties
       });
       if (filterResult && filterResult.length > 0) {
-        this._addDataflowLayer(layerInfo, features);
+        this._addDataflowLayer(layerInfo, features[0]);
       }
     } else {
-      this._addDataflowLayer(layerInfo, features);
+      this._addDataflowLayer(layerInfo, features[0]);
     }
   }
 
@@ -676,7 +953,7 @@ export default class WebMapViewModel extends WebMapBase {
     let layerID = layerInfo.layerID;
     if (layerInfo.layerType === 'DATAFLOW_HEAT') {
       if (!this.map.getSource(layerID)) {
-        this._createHeatLayer(layerInfo, [feature]);
+        this._createHeatLayer(layerInfo, [feature], false);
       } else {
         this._updateDataFlowFeature(layerID, feature, layerInfo);
       }
@@ -690,16 +967,16 @@ export default class WebMapViewModel extends WebMapBase {
           layerInfo.identifyField
         );
         if (['BASIC_POINT', 'SVG_POINT', 'IMAGE_POINT'].includes(layerStyle.type)) {
-          this._createGraphicLayer(layerInfo, [feature], null, iconRotateExpression);
+          this._createGraphicLayer(layerInfo, [feature], null, iconRotateExpression, false);
         } else {
-          this._createSymbolLayer(layerInfo, [feature], null, iconRotateExpression);
+          this._createSymbolLayer(layerInfo, [feature], null, iconRotateExpression, false);
         }
       } else {
         this._updateDataFlowFeature(layerID, feature, layerInfo, 'point');
       }
       if (layerInfo.labelStyle && layerInfo.visible) {
         if (!this.map.getSource(layerID + '-label')) {
-          this._addLabelLayer(layerInfo, [feature]);
+          this._addLabelLayer(layerInfo, [feature], true);
         } else {
           this._updateDataFlowFeature(layerID + '-label', feature, layerInfo);
         }
@@ -784,15 +1061,19 @@ export default class WebMapViewModel extends WebMapBase {
   }
 
   private _createRankSymbolLayer(layerInfo, features) {
+    const { minzoom, maxzoom } = layerInfo;
     let fieldName = layerInfo.themeSetting.themeField;
+    let colors = layerInfo.themeSetting.colors;
     let style = layerInfo.style;
     let featureType = layerInfo.featureType;
     let styleSource: any = this.createRankStyleSource(layerInfo, features);
     let styleGroups = styleSource.styleGroups;
-    features = this.getFiterFeatures(layerInfo.filterCondition, features);
+    features = this.getFilterFeatures(layerInfo.filterCondition, features);
     // 获取 expression
     let expression = ['match', ['get', 'index']];
-    features.forEach(row => {
+    let colorExpression = ['match', ['get', 'index']];
+    for (let index = 0; index < features.length; index++) {
+      const row = features[index];
       let tartget = parseFloat(row.properties[fieldName]);
       if (styleGroups) {
         for (let i = 0; i < styleGroups.length; i++) {
@@ -804,18 +1085,20 @@ export default class WebMapViewModel extends WebMapBase {
                   : Number.parseFloat((styleGroups[i].radius / style.imageInfo.size.h).toFixed(2)) * 2
                 : styleGroups[i].radius;
             expression.push(row.properties['index'], radius);
+            colorExpression.push(row.properties['index'], styleGroups[i].color);
+            break;
           }
         }
       }
-      // @ts-ignore
-      !tartget && expression.push(row.properties['index'], 1);
-    }, this);
+    }
     // @ts-ignore
     expression.push(1);
-
+    colorExpression.push('rgba(0, 0, 0, 0)');
     // 图例处理
     this._initLegendConfigInfo(layerInfo, styleGroups);
-
+    if (colors && colors.length > 0) {
+      style.fillColor = colorExpression;
+    }
     if (style.type === 'SYMBOL_POINT') {
       this._createSymbolLayer(layerInfo, features, expression);
     } else if (style.type === 'IMAGE_POINT') {
@@ -834,81 +1117,150 @@ export default class WebMapViewModel extends WebMapBase {
           visibility: layerInfo.visible
         }
       };
-      layerStyle.style = this._transformStyleToMapBoxGl(style, featureType, expression, 'circle-radius');
+      layerStyle.style = this._transformStyleToMapBoxGl(layerInfo.style, featureType, expression, 'circle-radius');
       let layerID = layerInfo.layerID;
-      this._addOverlayToMap(featureType, source, layerID, layerStyle);
+      this._addOverlayToMap(featureType, source, layerID, layerStyle, minzoom, maxzoom);
       this._addLayerSucceeded();
     }
   }
 
-  private _addLabelLayer(layerInfo: any, features: any): void {
+  private _addLabelLayer(layerInfo: any, features: any, addSource: boolean = false): void {
     let labelStyle = layerInfo.labelStyle;
+    let { backgroundFill, fontFamily } = labelStyle;
+    const { minzoom, maxzoom } = layerInfo;
+    const textSize = parseFloat(labelStyle.fontSize || 14);
+    backgroundFill = `rgba(${backgroundFill.join(',')})`;
+    let textHaloColor = 'rgba(255,255,255,0)';
+    if (labelStyle.outlineColor && labelStyle.outlineWidth > 0) {
+      textHaloColor = labelStyle.outlineColor;
+    } else if (labelStyle.placement !== 'line') {
+      textHaloColor = backgroundFill || 'rgba(255,255,255,1)';
+    }
+
+    let textHaloWidth = (labelStyle.outlineWidth || 0) / 2;
+    if (textHaloWidth === 0 && labelStyle.placement !== 'line' && backgroundFill) {
+      textHaloWidth = 4;
+    }
+    let textAnchor = labelStyle.textAlign || 'center';
+    if (labelStyle.textBaseline && labelStyle.textBaseline !== 'middle') {
+      textAnchor = `${labelStyle.textBaseline}${textAnchor === 'center' ? '' : `-${textAnchor}`}`;
+    }
+
+    let textOffset =
+      layerInfo.featureType === 'POINT'
+        ? [labelStyle.offsetX / textSize || 0, labelStyle.offsetY / textSize || 0]
+        : [0, 0];
     this._addLayer({
       id: `${layerInfo.layerID}-label`,
       type: 'symbol',
-      source: {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: features
-        }
-      },
+      source:
+        this.map.getSource(layerInfo.layerID) && !addSource
+          ? layerInfo.layerID
+          : {
+              type: 'geojson',
+              data: {
+                type: 'FeatureCollection',
+                features: features
+              }
+            },
       paint: {
         'text-color': labelStyle.fill,
-        'text-halo-color': 'rgba(255,255,255,0.8)',
-        'text-halo-width': parseFloat(labelStyle.fontSize) || 12
+        'text-halo-color': textHaloColor,
+        'text-halo-width': textHaloWidth
       },
       layout: {
         'text-field': `{${labelStyle.labelField}}`,
-        'text-size': parseFloat(labelStyle.fontSize) || 12,
-        'text-offset': labelStyle.offsetX ? [labelStyle.offsetX / 10 || 0, labelStyle.offsetY / 10 || 0] : [0, -2.5],
-        'text-font': ['DIN Offc Pro Italic', 'Arial Unicode MS Regular'],
+        'text-size': textSize,
+        'text-offset': textOffset,
+        'text-font': fontFamily ? [fontFamily] : ['DIN Offc Pro Italic', 'Arial Unicode MS Regular'],
+        'symbol-placement':
+          labelStyle.placement === 'line' ? (layerInfo.featureType === 'POLYGON' ? 'line' : 'line-center') : 'point',
+        'text-max-angle': layerInfo.featureType === 'POLYGON' ? 40 : 30,
+        'symbol-spacing': layerInfo.featureType === 'POLYGON' ? 200 : 50,
+        'text-anchor': textAnchor,
+        'text-line-height': 1.2,
         visibility: layerInfo.visible
-      }
+      },
+      minzoom: minzoom || 0,
+      maxzoom: maxzoom || 22
     });
   }
 
-  private _createSymbolLayer(layerInfo: any, features: any, textSize?, textRotateExpresion?): void {
+  private _createSymbolLayer(
+    layerInfo: any,
+    features: any,
+    textSizeExpresion?,
+    textRotateExpresion?,
+    addToMap = true,
+    filter?
+  ): void {
     // 用来请求symbol_point字体文件
     let target = document.getElementById(`${this.target}`);
     target.classList.add('supermapol-icons-map');
-
-    let style = layerInfo.style;
-    let unicode = layerInfo.style.unicode;
+    const { layerID, minzoom, maxzoom, style } = layerInfo;
+    let unicode = style.unicode;
     let text = String.fromCharCode(parseInt(unicode.replace(/^&#x/, ''), 16));
-    let layerID = layerInfo.layerID;
-    this._addLayer({
-      id: layerID,
-      type: 'symbol',
-      source: {
+    const textSize = textSizeExpresion || (style.fontSize && parseFloat(style.fontSize)) || 12;
+    const rotate = ((layerInfo.style['rotation'] || 0) * 180) / Math.PI;
+    if (!this.map.getSource(layerID)) {
+      this.map.addSource(layerID, {
         type: 'geojson',
         data: {
           type: 'FeatureCollection',
           features: []
         }
-      },
+      });
+    }
+    const layerOptions: any = {
+      id: layerID,
+      type: 'symbol',
+      source: layerID,
       paint: {
-        'text-color': style.fillColor
+        'text-color': Array.isArray(style.fillColor)
+          ? style.fillColor
+          : getColorWithOpacity(style.fillColor, style.fillOpacity),
+        // 'text-opacity': style.fillOpacity === 0 ? 0.1 : style.fillOpacity,
+        'text-halo-color': Array.isArray(style.strokeColor)
+          ? style.strokeColor
+          : getColorWithOpacity(style.strokeColor || 'rgba(0,0,0,0)', style.strokeOpacity),
+        'text-halo-width': style.strokeWidth || 0
       },
       layout: {
         'text-field': text,
-        'text-size': textSize || (style.fontSize && parseFloat(style.fontSize)) || 12,
+        'text-size': textSize,
         'text-font': ['DIN Offc Pro Italic', 'Arial Unicode MS Regular'],
-        'text-rotate': textRotateExpresion || 0,
+        'text-rotate': textRotateExpresion || rotate || 0,
+        'text-offset': Array.isArray(style.offsetX) ? style.offsetX : [style.offsetX / 2 || 0, style.offsetY / 2 || 0],
+        'text-allow-overlap': true,
         visibility: layerInfo.visible
-      }
-    });
+      },
+      minzoom: minzoom || 0,
+      maxzoom: maxzoom || 22
+    };
+    if (filter) {
+      layerOptions.filter = filter;
+    }
+    this._addLayer(layerOptions);
     // @ts-ignore
     this.map.getSource(layerID).setData({
       type: 'FeatureCollection',
       features: features
     });
-    this._addLayerSucceeded();
+    if (addToMap) {
+      this._addLayerSucceeded();
+    }
   }
 
-  private _createGraphicLayer(layerInfo: any, features: any, iconSizeExpression?, iconRotateExpression?) {
-    let style = layerInfo.style;
-    let layerID = layerInfo.layerID;
+  private _createGraphicLayer(
+    layerInfo: any,
+    features: any,
+    iconSizeExpression?,
+    iconRotateExpression?,
+    addToMap = true,
+    filter?
+  ) {
+    let { layerID, minzoom, maxzoom, style } = layerInfo;
+
     let source: mapboxglTypes.GeoJSONSourceRaw = {
       type: 'geojson',
       data: {
@@ -916,7 +1268,10 @@ export default class WebMapViewModel extends WebMapBase {
         features: features
       }
     };
-
+    if (!this.map.getSource(layerID)) {
+      this.map.addSource(layerID, source);
+    }
+    const iconID = `imageIcon-${layerID}`;
     if (style.type === 'IMAGE_POINT') {
       let imageInfo = style.imageInfo;
       this.map.loadImage(imageInfo.url, (error, image) => {
@@ -924,20 +1279,31 @@ export default class WebMapViewModel extends WebMapBase {
           console.error(error);
           return;
         }
-        let iconSize = Number.parseFloat((style.radius / image.height).toFixed(2)) * 2;
-        !this.map.hasImage('imageIcon') && this.map.addImage('imageIcon', image);
-        this._addLayer({
+        let iconSize = Number.parseFloat((style.radius / image.width).toFixed(2)) * 2;
+        !this.map.hasImage(iconID) && this.map.addImage(iconID, image);
+        const layerOptions: any = {
           id: layerID,
           type: 'symbol',
-          source: source,
+          source: layerID,
           layout: {
-            'icon-image': 'imageIcon',
+            'icon-image': iconID,
+            'icon-anchor': 'bottom-right',
             'icon-size': iconSizeExpression || iconSize,
+            'icon-allow-overlap': true,
             visibility: layerInfo.visible,
-            'icon-rotate': iconRotateExpression || 0
-          }
-        });
-        this._addLayerSucceeded();
+            'icon-offset': [style.offsetX * image.width || 0, style.offsetY * image.height || 0],
+            'icon-rotate': iconRotateExpression || ((layerInfo.style['rotation'] || 0) * 180) / Math.PI
+          },
+          minzoom: minzoom || 0,
+          maxzoom: maxzoom || 22
+        };
+        if (filter) {
+          layerOptions.filter = filter;
+        }
+        this._addLayer(layerOptions);
+        if (addToMap) {
+          this._addLayerSucceeded();
+        }
       });
     } else if (style.type === 'SVG_POINT') {
       let svgUrl = style.url;
@@ -946,27 +1312,41 @@ export default class WebMapViewModel extends WebMapBase {
         document.body.appendChild(this._svgDiv);
       }
       this.getCanvasFromSVG(svgUrl, this._svgDiv, canvas => {
-        this.handleSvgColor(style, canvas);
+        // this.handleSvgColor(style, canvas);
         let imgUrl = canvas.toDataURL('img/png');
         imgUrl &&
           this.map.loadImage(imgUrl, (error, image) => {
             if (error) {
               console.log(error);
             }
-            let iconSize = Number.parseFloat((style.radius / canvas.width).toFixed(2));
-            !this.map.hasImage('imageIcon') && this.map.addImage('imageIcon', image);
-            this._addLayer({
+            let iconSize = Number.parseFloat((style.radius / canvas.width).toFixed(2)) * 2;
+            !this.map.hasImage(svgUrl) && this.map.addImage(svgUrl, image, { sdf: true });
+            const layerOptions: any = {
               id: layerID,
               type: 'symbol',
-              source: source,
+              source: layerID,
               layout: {
-                'icon-image': 'imageIcon',
+                'icon-image': svgUrl,
                 'icon-size': iconSizeExpression || iconSize,
+                'icon-anchor': 'bottom-right',
                 visibility: layerInfo.visible,
-                'icon-rotate': iconRotateExpression || 0
-              }
-            });
-            this._addLayerSucceeded();
+                'icon-offset': [style.offsetX * canvas.width || 0, style.offsetY * canvas.height || 0],
+                'icon-allow-overlap': true,
+                'icon-rotate': iconRotateExpression || ((layerInfo.style['rotation'] || 0) * 180) / Math.PI
+              },
+              paint: {
+                'icon-color': style.fillColor
+              },
+              minzoom: minzoom || 0,
+              maxzoom: maxzoom || 22
+            };
+            if (filter) {
+              layerOptions.filter = filter;
+            }
+            this._addLayer(layerOptions);
+            if (addToMap) {
+              this._addLayerSucceeded();
+            }
           });
       });
     } else {
@@ -976,43 +1356,95 @@ export default class WebMapViewModel extends WebMapBase {
           visibility: layerInfo.visible
         }
       };
-      this._addOverlayToMap('POINT', source, layerID, layerStyle);
-      this._addLayerSucceeded();
+      this._addOverlayToMap('POINT', layerID, layerID, layerStyle, minzoom, maxzoom);
+      if (addToMap) {
+        this._addLayerSucceeded();
+      }
     }
   }
 
   private _createUniqueLayer(layerInfo: any, features: any): void {
-    let styleGroup = this.getUniqueStyleGroup(layerInfo, features);
-    features = this.getFiterFeatures(layerInfo.filterCondition, features);
-
-    let style = layerInfo.style;
-    let themeField = layerInfo.themeSetting.themeField;
-    Object.keys(features[0].properties).forEach(key => {
-      key.toLocaleUpperCase() === themeField.toLocaleUpperCase() && (themeField = key);
-    });
-    let type = layerInfo.featureType;
-    let expression = ['match', ['get', 'index']];
-    let layerID = layerInfo.layerID;
-
-    features.forEach(row => {
-      styleGroup.forEach(item => {
-        if (item.value === row.properties[themeField]) {
-          expression.push(row.properties['index'], item.color);
+    const symbolConvertFunctionFactory = {
+      unicode: ({ unicode }): string => {
+        return String.fromCharCode(parseInt(unicode.replace(/^&#x/, ''), 16));
+      },
+      fontSize: ({ fontSize }): number => {
+        if (fontSize) {
+          return parseFloat(fontSize);
         }
-      });
-    });
-    expression.push('#ffffff');
-
-    // 图例相关
-    this._initLegendConfigInfo(layerInfo, styleGroup);
-
-    let visible = layerInfo.visible;
-    let layerStyle = {
-      style: this._transformStyleToMapBoxGl(style, type, expression),
-      layout: {
-        visibility: visible
+        return 12;
+      },
+      rotation: ({ rotation }): number => {
+        return ((rotation || 0) * 180) / Math.PI;
+      },
+      fillColor: ({ fillColor, fillOpacity }): string => {
+        return getColorWithOpacity(fillColor, fillOpacity);
+      },
+      strokeColor: ({ strokeColor, strokeOpacity }): string => {
+        return getColorWithOpacity(strokeColor || 'rgba(0,0,0,0)', strokeOpacity);
+      },
+      strokeWidth: ({ strokeWidth }): string => {
+        return strokeWidth || 0;
+      },
+      offsetX: ({ offsetX, offsetY }): [number, number] => {
+        return [offsetX / 2 || 0, offsetY / 2 || 0];
       }
     };
+    const defaultValueFactory = {
+      unicode: '',
+      fontSize: 12,
+      rotation: 0,
+      strokeColor: 'rgba(0,0,0,0)',
+      fillColor: 'rgba(0,0,0,0)',
+      strokeWidth: 0,
+      offsetX: [0, 0]
+    };
+    let styleGroup = this.getUniqueStyleGroup(layerInfo, features);
+    features = this.getFilterFeatures(layerInfo.filterCondition, features);
+    const { layerID, minzoom, maxzoom, style } = layerInfo;
+    let themeField = styleGroup[0].themeField;
+    let type = layerInfo.featureType;
+
+    const defultLayerStyle = layerInfo.style;
+    //样式expression池 样式key值为webmap的样式key值
+    const expressionMap = {};
+    // 自定义单值值对应的样式
+    const customStyleMap = {};
+    styleGroup.map(style => {
+      customStyleMap[style.value] = style;
+    });
+    //遍历要素，判断该要素是不是在自定义单值中，若是在对应样式match expression中增加改要素的索引
+    features.forEach(({ properties }) => {
+      const customStyle = customStyleMap[properties[themeField]];
+      if (customStyle) {
+        const itemStyle = customStyle.style;
+        for (const key in itemStyle) {
+          if (Object.prototype.hasOwnProperty.call(itemStyle, key)) {
+            let itemStyleElement = itemStyle[key];
+            if (itemStyleElement !== defultLayerStyle[key]) {
+              if (!expressionMap[key]) {
+                expressionMap[key] = ['match', ['get', 'index']];
+              }
+              expressionMap[key].push(
+                properties['index'],
+                symbolConvertFunctionFactory[key] ? symbolConvertFunctionFactory[key](itemStyle) : itemStyleElement
+              );
+            }
+          }
+        }
+      }
+    });
+    // 给每个expression增加最后一个默认值
+    for (const key in expressionMap) {
+      if (Object.prototype.hasOwnProperty.call(expressionMap, key)) {
+        const expression = expressionMap[key];
+        const defaultStyleItem = defultLayerStyle[key] || defaultValueFactory[key];
+        expression.push(defaultStyleItem === undefined ? null : defaultStyleItem);
+      }
+    }
+
+    // Todo 图例相关
+    this._initLegendConfigInfo(layerInfo, styleGroup);
 
     let source: mapboxglTypes.GeoJSONSourceRaw = {
       type: 'geojson',
@@ -1021,145 +1453,478 @@ export default class WebMapViewModel extends WebMapBase {
         features: features
       }
     };
-    this._addOverlayToMap(type, source, layerID, layerStyle);
-    type === 'POLYGON' &&
-      style.strokeColor &&
-      this._addStrokeLineForPoly(style, layerID, layerID + '-strokeLine', visible);
+    const sourceID = layerID;
+    this.map.addSource(sourceID, source);
+
+    let visible = layerInfo.visible;
+    const layerCreateFcuntion = (type, sourceID, layerID, style, minzoom, maxzoom, filter?) => {
+      const layerStyle = {
+        style: this._transformStyleToMapBoxGl({ ...style }, type),
+        layout: {
+          visibility: visible
+        }
+      };
+      this._addOverlayToMap(type, sourceID, layerID, layerStyle, minzoom, maxzoom, filter);
+    };
+    if (['POLYGON', 'LINE'].includes(type)) {
+      // linedash不能用表达式处理，需用多个图层
+      const lineDashExpression = expressionMap['lineDash'];
+      //非自定义要素过滤表达式
+      const defaultFilterExpression: any = ['all'];
+      let handlerLine = false;
+      let fristName = '';
+      if (lineDashExpression && lineDashExpression.length > 1) {
+        delete expressionMap['lineDash'];
+        const filterField = lineDashExpression[1];
+        const tempLayerID = type === 'POLYGON' ? layerID + '-strokeLine' : layerID;
+        for (let index = 2; index < lineDashExpression.length - 1; index += 2) {
+          const filterExpression = ['==', filterField, lineDashExpression[index]];
+          defaultFilterExpression.push(['!=', filterField, lineDashExpression[index]]);
+          const additionalLayerName = `${tempLayerID}-additional-linedasharray-${index / 2}`;
+          if (!fristName) {
+            fristName = additionalLayerName;
+          }
+          layerCreateFcuntion(
+            'LINE',
+            sourceID,
+            additionalLayerName,
+            { ...style, ...expressionMap, lineDash: lineDashExpression[index + 1] },
+            minzoom,
+            maxzoom,
+            filterExpression
+          );
+        }
+        if (defaultFilterExpression.length > 1) {
+          layerCreateFcuntion(
+            'LINE',
+            sourceID,
+            tempLayerID,
+            { ...style, ...expressionMap, lineDash: lineDashExpression[lineDashExpression.length] },
+            minzoom,
+            maxzoom,
+            defaultFilterExpression
+          );
+        }
+        handlerLine = true;
+      }
+      //没有自定义虚线的情况
+      if (type === 'LINE' && !handlerLine) {
+        layerCreateFcuntion(
+          'LINE',
+          sourceID,
+          layerID,
+          { ...style, ...expressionMap },
+          minzoom,
+          maxzoom,
+          defaultFilterExpression
+        );
+      }
+      // 面
+      if (type === 'POLYGON') {
+        layerCreateFcuntion('POLYGON', sourceID, layerID, { ...style, ...expressionMap }, minzoom, maxzoom);
+        if (fristName) {
+          this.map.moveLayer(layerID, fristName);
+        }
+        // 面且没有虚线
+        if (!handlerLine) {
+          layerCreateFcuntion(
+            'LINE',
+            sourceID,
+            layerID + '-strokeLine',
+            { ...style, ...expressionMap },
+            minzoom,
+            maxzoom,
+            defaultFilterExpression
+          );
+          if (fristName) {
+            this.map.moveLayer(layerID + '-strokeLine', fristName);
+          }
+        }
+      }
+    } else {
+      const defaultFilterExpression: any = ['all'];
+      const unicodeExpression = expressionMap['unicode'];
+      // SYMBOL_POINT
+      if (unicodeExpression) {
+        const classNameExpression = expressionMap['className'] || [];
+        delete expressionMap['unicode'];
+        delete expressionMap['classname'];
+        const additionalLayerName = `${layerID}-additional-symbol`;
+        const filterExpression: any = ['any'];
+        // defaultExpression.push(['!=', filterField, lineDashExpression[index]]);
+        for (let index = 2; index < classNameExpression.length - 1; index += 2) {
+          defaultFilterExpression.push(['!=', classNameExpression[1], classNameExpression[index]]);
+          filterExpression.push(['==', classNameExpression[1], classNameExpression[index]]);
+        }
+        // this._createSymbolLayer()
+        // 用来请求symbol_point字体文件
+        let target = document.getElementById(`${this.target}`);
+        target.classList.add('supermapol-icons-map');
+        const symbolStyle = { ...style, ...expressionMap };
+        const layerOptions: any = {
+          id: additionalLayerName,
+          type: 'symbol',
+          source: sourceID,
+          paint: {
+            'text-color': symbolStyle.fillColor,
+            // 'text-opacity': style.fillOpacity === 0 ? 0.1 : style.fillOpacity,
+            'text-halo-color': symbolStyle.strokeColor,
+            'text-halo-width': symbolStyle.strokeWidth
+          },
+          layout: {
+            'text-field': unicodeExpression,
+            'text-size':
+              typeof symbolStyle.fontSize === 'string' ? parseInt(symbolStyle.fontSize) : symbolStyle.fontSize || 12,
+            'text-font': ['DIN Offc Pro Italic', 'Arial Unicode MS Regular'],
+            'text-rotate': symbolStyle.rotation || 0,
+            'text-offset': Array.isArray(symbolStyle.offsetX)
+              ? symbolStyle.offsetX
+              : [symbolStyle.offsetX / 2 || 0, symbolStyle.offsetY / 2 || 0],
+            'text-allow-overlap': true,
+            visibility: visible
+          },
+          minzoom: minzoom || 0,
+          maxzoom: maxzoom || 22
+        };
+        if (filterExpression.length > 1) {
+          layerOptions.filter = filterExpression;
+        }
+        this._addLayer(layerOptions);
+      }
+      //IMAGE_POINT 或者 SVG_POINT
+      const imageInfoExpression = expressionMap['imageInfo'] || [];
+      const urlExpression = expressionMap['url'] || [];
+      if (imageInfoExpression.length > 0 || urlExpression.length > 0) {
+        delete expressionMap['imageInfo'];
+        delete expressionMap['url'];
+        const imageList = [];
+        // image表达式 和 过滤表达式
+        const imageExpresssion = imageInfoExpression.length > 0 ? [imageInfoExpression[0], imageInfoExpression[1]] : [];
+        const svgExpresssion = urlExpression.length > 0 ? [urlExpression[0], urlExpression[1]] : [];
+        const imagefilterExpression: any = ['any'];
+        const svgfilterExpression: any = ['any'];
+        for (let index = 2; index < imageInfoExpression.length - 1; index += 2) {
+          const element = imageInfoExpression[index + 1];
+          imageList.push(element.url);
+          imageExpresssion.push(imageInfoExpression[index]);
+          imageExpresssion.push(element.url);
+          defaultFilterExpression.push(['!=', imageInfoExpression[1], imageInfoExpression[index]]);
+          imagefilterExpression.push(['==', imageInfoExpression[1], imageInfoExpression[index]]);
+        }
+        for (let index = 2; index < urlExpression.length - 1; index += 2) {
+          const element = urlExpression[index + 1];
+          imageList.push(element);
+          svgExpresssion.push(urlExpression[index]);
+          svgExpresssion.push(element);
+          defaultFilterExpression.push(['!=', urlExpression[1], urlExpression[index]]);
+          svgfilterExpression.push(['==', urlExpression[1], urlExpression[index]]);
+        }
+        imageExpresssion.push('');
+        svgExpresssion.push('');
+
+        const loadImagePromise = src => {
+          return new Promise((resolve, reject) => {
+            if (src.indexOf('svg') < 0) {
+              this.map.loadImage(src, (error, image) => {
+                if (error) {
+                  console.log(error);
+                  resolve(error);
+                  return;
+                }
+                !this.map.hasImage(src) && this.map.addImage(src, image);
+                resolve({ src, image });
+              });
+            } else {
+              if (!this._svgDiv) {
+                this._svgDiv = document.createElement('div');
+                document.body.appendChild(this._svgDiv);
+              }
+              this.getCanvasFromSVG(src, this._svgDiv, canvas => {
+                this.handleSvgColor(defultLayerStyle, canvas);
+                this.map.loadImage(canvas.toDataURL('img/png'), (error, image) => {
+                  if (error) {
+                    console.log(error);
+                    resolve(error);
+                    return;
+                  }
+                  // sdf: true 可以设置icon-color
+                  !this.map.hasImage(src) && this.map.addImage(src, image, { sdf: true });
+                  resolve({ src, image });
+                });
+              });
+            }
+          });
+        };
+        const promiseList = [];
+        imageList.forEach(src => {
+          promiseList.push(loadImagePromise(src));
+        });
+        const symbolStyle = { ...style, ...expressionMap };
+        Promise.all(promiseList).then(images => {
+          const imageSize = {};
+          const radiusMap = {};
+          const radiusExpress = expressionMap['radius'] || [];
+          for (let index = 2; index < radiusExpress.length - 1; index += 2) {
+            radiusMap[radiusExpress[index]] = radiusExpress[index + 1];
+          }
+          images.forEach(image => {
+            if (image && image.src) {
+              imageSize[image.src] = image.image.width;
+            }
+          });
+          // icon-color在一个图层中能全起作用或者全不起作用   所以image和svg分两个图层
+          // icon-size和图片大小有关系
+          if (imageExpresssion.length > 1) {
+            const iconSizeExpression: any = ['match', ['get', 'index']];
+            for (let index = 2; index < imageExpresssion.length - 1; index += 2) {
+              const featureIndex = imageExpresssion[index];
+              const featureSrc = imageExpresssion[index + 1];
+              const iconSize =
+                Number.parseFloat(((radiusMap[featureIndex] || 8) / imageSize[featureSrc]).toFixed(2)) * 2;
+              iconSizeExpression.push(featureIndex);
+              iconSizeExpression.push(iconSize);
+            }
+            iconSizeExpression.push(1);
+
+            this._addLayer({
+              id: `${layerID}-additional-image`,
+              type: 'symbol',
+              source: sourceID,
+              layout: {
+                'icon-image': imageExpresssion,
+                'icon-anchor': 'bottom-right',
+                'icon-size': iconSizeExpression,
+                'icon-allow-overlap': true,
+                visibility: layerInfo.visible,
+                'icon-offset': symbolStyle.offsetX || [0, 0],
+                'icon-rotate': symbolStyle.rotation || 0
+              },
+              minzoom: minzoom || 0,
+              maxzoom: maxzoom || 22,
+              filter: imagefilterExpression
+            });
+          }
+          if (svgExpresssion.length > 1) {
+            const iconSizeExpression: any = ['match', ['get', 'index']];
+            for (let index = 2; index < svgExpresssion.length - 1; index += 2) {
+              const featureIndex = svgExpresssion[index];
+              const featureSrc = svgExpresssion[index + 1];
+              const iconSize =
+                Number.parseFloat(((radiusMap[featureIndex] || 8) / imageSize[featureSrc]).toFixed(2)) * 2;
+              iconSizeExpression.push(featureIndex);
+              iconSizeExpression.push(iconSize);
+            }
+            iconSizeExpression.push(1);
+            this._addLayer({
+              id: `${layerID}-additional-svg`,
+              type: 'symbol',
+              source: sourceID,
+              layout: {
+                'icon-image': svgExpresssion,
+                'icon-anchor': 'bottom-right',
+                'icon-size': 1,
+                'icon-allow-overlap': true,
+                visibility: layerInfo.visible,
+                'icon-offset': symbolStyle.offsetX || [0, 0],
+                'icon-rotate': symbolStyle.rotation || 0
+              },
+              paint: {
+                'icon-color': symbolStyle.fillColor
+              },
+              minzoom: minzoom || 0,
+              maxzoom: maxzoom || 22,
+              filter: svgfilterExpression
+            });
+          }
+        });
+      }
+      if (style.type === 'SYMBOL_POINT') {
+        const tmpLayerInfo = { ...layerInfo };
+        tmpLayerInfo.style = { ...style, ...expressionMap, type: style.type };
+        this._createSymbolLayer(
+          tmpLayerInfo,
+          features,
+          '',
+          '',
+          true,
+          defaultFilterExpression.length > 1 ? defaultFilterExpression : undefined
+        );
+      } else if (style.type === 'IMAGE_POINT' || style.type === 'SVG_POINT') {
+        const tmpLayerInfo = { ...layerInfo };
+        tmpLayerInfo.style = { ...style, ...expressionMap, type: style.type };
+        this._createGraphicLayer(
+          tmpLayerInfo,
+          features,
+          '',
+          '',
+          true,
+          defaultFilterExpression.length > 1 ? defaultFilterExpression : undefined
+        );
+      } else {
+        layerCreateFcuntion(
+          'POINT',
+          sourceID,
+          layerID,
+          { ...style, ...expressionMap },
+          minzoom,
+          maxzoom,
+          defaultFilterExpression.length > 1 ? defaultFilterExpression : undefined
+        );
+      }
+    }
     this._addLayerSucceeded();
   }
 
   private _getWMTSUrl(options: any): string {
+    if (options.requestEncoding === 'REST' && options.restResourceURL) {
+      return options.restResourceURL
+        .replace('{Style}', options.style || '')
+        .replace('{TileMatrixSet}', options.tileMatrixSet)
+        .replace('{TileRow}', '{y}')
+        .replace('{TileCol}', '{x}')
+        .replace('{TileMatrix}', '{z}');
+    }
     let obj = {
       service: 'WMTS',
       request: 'GetTile',
       version: '1.0.0',
-      style: 'default',
+      style: options.style || '',
       layer: options.layer,
       tilematrixSet: options.tileMatrixSet,
-      format: 'image/png'
+      format: 'image/png',
+      tilematrix: '{z}',
+      tilerow: '{y}',
+      tilecol: '{x}'
     };
-    let url = options.url;
-
-    url += this._getParamString(obj, url) + '&tilematrix={z}&tilerow={y}&tilecol={x}';
-    return url;
+    return `${options.kvpResourceUrl}${this._getParamString(obj, options.kvpResourceUrl)}`;
   }
 
   private _createMarkerLayer(layerInfo: any, features: any): void {
-    const promises =
-      features &&
-      features.map(feature => {
-        return new Promise((resolve, reject) => {
-          let geomType = feature.geometry.type.toUpperCase();
-          let defaultStyle = feature.dv_v5_markerStyle;
-          if (geomType === 'POINT' && defaultStyle.text) {
-            // 说明是文字的feature类型
-            geomType = 'TEXT';
+    const { minzoom, maxzoom } = layerInfo;
+    const marker_src = {};
+    features = features || [];
+    features.forEach(feature => {
+      const defaultStyle = feature.dv_v5_markerStyle;
+      let geomType = feature.geometry.type.toUpperCase();
+      if (geomType === 'POINT' && defaultStyle.text) {
+        // 说明是文字的feature类型
+        geomType = 'TEXT';
+      }
+      if (
+        geomType === 'POINT' &&
+        defaultStyle.src &&
+        defaultStyle.src.indexOf('http://') === -1 &&
+        defaultStyle.src.indexOf('https://') === -1
+      ) {
+        // 说明地址不完整
+        defaultStyle.src = this.serverUrl + defaultStyle.src;
+      }
+      if (!marker_src[defaultStyle.src]) {
+        marker_src[defaultStyle.src] = defaultStyle;
+      }
+    });
+    const loadImagePromise = (src, defaultStyle) => {
+      return new Promise((resolve, reject) => {
+        if (src.indexOf('svg') < 0) {
+          this.map.loadImage(src, (error, image) => {
+            if (error) {
+              console.log(error);
+              resolve(error);
+              return;
+            }
+            !this.map.hasImage(src) && this.map.addImage(src, image);
+            resolve(src);
+          });
+        } else {
+          if (!this._svgDiv) {
+            this._svgDiv = document.createElement('div');
+            document.body.appendChild(this._svgDiv);
           }
-          let featureInfo = this.setFeatureInfo(feature);
-          feature.properties['useStyle'] = defaultStyle;
-          feature.properties['featureInfo'] = featureInfo;
-          if (
-            geomType === 'POINT' &&
-            defaultStyle.src &&
-            defaultStyle.src.indexOf('http://') === -1 &&
-            defaultStyle.src.indexOf('https://') === -1
-          ) {
-            // 说明地址不完整
-            defaultStyle.src = this.serverUrl + defaultStyle.src;
-          }
-
-          let source: mapboxglTypes.GeoJSONSourceRaw = {
-            type: 'geojson',
-            data: feature
-          };
-          let index = feature.properties.index;
-          let layerID = geomType + '-' + index;
-          // image-marker
-          geomType === 'POINT' &&
-            defaultStyle.src &&
-            defaultStyle.src.indexOf('svg') <= -1 &&
-            this.map.loadImage(defaultStyle.src, (error, image) => {
+          this.getCanvasFromSVG(src, this._svgDiv, canvas => {
+            this.handleSvgColor(defaultStyle, canvas);
+            this.map.loadImage(canvas.toDataURL('img/png'), (error, image) => {
               if (error) {
                 console.log(error);
-                reject();
+                resolve(error);
+                return;
               }
-              this.map.addImage(index + '', image);
-              this._addLayer({
-                id: layerID,
-                type: 'symbol',
-                source: source,
-                layout: {
-                  'icon-image': index + '',
-                  'icon-size': defaultStyle.scale,
-                  visibility: layerInfo.visible
-                }
-              });
-              resolve();
+              !this.map.hasImage(src) && this.map.addImage(src, image);
+              resolve(src);
             });
-
-          // svg-marker
-          if (geomType === 'POINT' && defaultStyle.src && defaultStyle.src.indexOf('svg') > -1) {
-            if (!this._svgDiv) {
-              this._svgDiv = document.createElement('div');
-              document.body.appendChild(this._svgDiv);
-            }
-            this.getCanvasFromSVG(defaultStyle.src, this._svgDiv, canvas => {
-              this.handleSvgColor(defaultStyle, canvas);
-              let imgUrl = canvas.toDataURL('img/png');
-              imgUrl &&
-                this.map.loadImage(imgUrl, (error, image) => {
-                  if (error) {
-                    console.log(error);
-                    reject();
-                  }
-                  this.map.addImage(index + '', image);
-                  this._addLayer({
-                    id: layerID,
-                    type: 'symbol',
-                    source: source,
-                    layout: {
-                      'icon-image': index + '',
-                      'icon-size': defaultStyle.scale,
-                      visibility: layerInfo.visible
-                    }
-                  });
-                  resolve();
-                });
-            });
-          }
-          // point-line-polygon-marker
-          if (!defaultStyle.src) {
-            let layeStyle: any = {
-              layout: {}
-            };
-            if (geomType === 'LINESTRING' && defaultStyle.lineCap) {
-              geomType = 'LINE';
-              layeStyle.layout = {
-                'line-cap': defaultStyle.lineCap
-              };
-            }
-            let visible = layerInfo.visible;
-            layeStyle.layout.visibility = visible;
-            // get style
-            layeStyle.style = this._transformStyleToMapBoxGl(defaultStyle, geomType);
-            this._addOverlayToMap(geomType, source, layerID, layeStyle);
-            // 若面有边框
-            geomType === 'POLYGON' &&
-              defaultStyle.strokeColor &&
-              this._addStrokeLineForPoly(defaultStyle, layerID, layerID + '-strokeLine', visible);
-
-            resolve();
-          }
-        });
+          });
+        }
       });
-    if (promises) {
-      Promise.all(promises).then(() => {
-        this._addLayerSucceeded();
-      });
+    };
+    const promiseList = [];
+    for (const src in marker_src) {
+      promiseList.push(loadImagePromise(src, marker_src[src]));
     }
+    Promise.all(promiseList).then(images => {
+      for (let i = 0; i < features.length; i++) {
+        const feature = features[i];
+        let defaultStyle = feature.dv_v5_markerStyle;
+        let geomType = feature.geometry.type.toUpperCase();
+        if (geomType === 'POINT' && defaultStyle.text) {
+          // 说明是文字的feature类型
+          geomType = 'TEXT';
+        }
+        let featureInfo = this.setFeatureInfo(feature);
+        feature.properties['useStyle'] = defaultStyle;
+        feature.properties['featureInfo'] = featureInfo;
+
+        let source: mapboxglTypes.GeoJSONSourceRaw = {
+          type: 'geojson',
+          data: feature
+        };
+        let index = feature.properties.index;
+        let layerID = geomType + '-' + index;
+        // image-marker  svg-marker
+        if (geomType === 'POINT' && defaultStyle.src) {
+          if (!images.includes(defaultStyle.src)) {
+            continue;
+          }
+          this._addLayer({
+            id: layerID,
+            type: 'symbol',
+            source: source,
+            layout: {
+              'icon-image': defaultStyle.src,
+              'icon-size': defaultStyle.scale,
+              visibility: layerInfo.visible
+            },
+            minzoom: minzoom || 0,
+            maxzoom: maxzoom || 22
+          });
+        }
+
+        // point-line-polygon-marker
+        if (!defaultStyle.src) {
+          let layeStyle: any = {
+            layout: {}
+          };
+          if (geomType === 'LINESTRING' && defaultStyle.lineCap) {
+            geomType = 'LINE';
+            layeStyle.layout = {
+              'line-cap': defaultStyle.lineCap
+            };
+          }
+          let visible = layerInfo.visible;
+          layeStyle.layout.visibility = visible;
+          // get style
+          layeStyle.style = this._transformStyleToMapBoxGl(defaultStyle, geomType);
+          this._addOverlayToMap(geomType, source, layerID, layeStyle, minzoom, maxzoom);
+          // 若面有边框
+          geomType === 'POLYGON' &&
+            defaultStyle.strokeColor &&
+            this._addStrokeLineForPoly(defaultStyle, layerID, layerID + '-strokeLine', visible, minzoom, maxzoom);
+        }
+      }
+      this._addLayerSucceeded();
+    });
   }
 
-  private _createHeatLayer(layerInfo: any, features: any): void {
+  private _createHeatLayer(layerInfo: any, features: any, addToMap = true): void {
+    const { minzoom, maxzoom } = layerInfo;
     let style = layerInfo.themeSetting;
     let layerOption = {
       gradient: style.colors.slice(),
@@ -1229,9 +1994,13 @@ export default class WebMapViewModel extends WebMapBase {
       paint: paint,
       layout: {
         visibility: layerInfo.visible
-      }
+      },
+      minzoom: minzoom || 0,
+      maxzoom: maxzoom || 22
     });
-    this._addLayerSucceeded();
+    if (addToMap) {
+      this._addLayerSucceeded();
+    }
   }
 
   private _changeWeight(features: any, weightFeild: string): void {
@@ -1262,38 +2031,39 @@ export default class WebMapViewModel extends WebMapBase {
 
   private _createRangeLayer(layerInfo: any, features: any): void {
     let fieldName = layerInfo.themeSetting.themeField;
-    let style = layerInfo.style;
     let featureType = layerInfo.featureType;
+    const { minzoom, maxzoom, style } = layerInfo;
     let styleGroups = this.getRangeStyleGroup(layerInfo, features);
 
-    features = this.getFiterFeatures(layerInfo.filterCondition, features);
-
-    let source: mapboxglTypes.GeoJSONSourceRaw = {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: features
-      }
-    };
+    features = this.getFilterFeatures(layerInfo.filterCondition, features);
 
     // 获取 expression
     let expression = ['match', ['get', 'index']];
-    features.forEach(row => {
+    const datas = features.filter((row, index, arr) => {
       let tartget = parseFloat(row.properties[fieldName]);
       if (!tartget && tartget !== 0) {
-        expression.push(row.properties['index'], 'rgba(0, 0, 0, 0)');
-        return;
+        // expression.push(row.properties['index'], 'rgba(0, 0, 0, 0)');
+        return false;
       }
       if (styleGroups) {
         for (let i = 0; i < styleGroups.length; i++) {
           if (styleGroups[i].start <= tartget && tartget < styleGroups[i].end) {
             expression.push(row.properties['index'], styleGroups[i].color);
+            break;
           }
         }
       }
+      return true;
     }, this);
     expression.push('rgba(0, 0, 0, 0)');
 
+    let source: mapboxglTypes.GeoJSONSourceRaw = {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: datas
+      }
+    };
     // 图例处理
     this._initLegendConfigInfo(layerInfo, styleGroups);
 
@@ -1311,11 +2081,11 @@ export default class WebMapViewModel extends WebMapBase {
     layerStyle.style = this._transformStyleToMapBoxGl(style, featureType, expression);
     // 添加图层
     let layerID = layerInfo.layerID;
-    this._addOverlayToMap(featureType, source, layerID, layerStyle);
+    this._addOverlayToMap(featureType, source, layerID, layerStyle, minzoom, maxzoom);
     // 如果面有边框
     featureType === 'POLYGON' &&
       style.strokeColor &&
-      this._addStrokeLineForPoly(style, layerID, layerID + '-strokeline', visible);
+      this._addStrokeLineForPoly(style, layerID, layerID + '-strokeLine', visible, minzoom, maxzoom);
     this._addLayerSucceeded();
   }
 
@@ -1343,7 +2113,21 @@ export default class WebMapViewModel extends WebMapBase {
         const targetlayerId = exsitLayers[index].layerID;
         const beforLayerId = exsitLayers[index + 1].layerID;
         this.map.moveLayer(targetlayerId, beforLayerId);
+        if (this.map.getLayer(`${targetlayerId}-strokeLine`)) {
+          this.map.moveLayer(`${targetlayerId}-strokeLine`, beforLayerId);
+        }
+        for (let index = 1; index < this.expectLayerLen + 1; index++) {
+          if (this.map.getLayer(`${targetlayerId}-additional-${index}`)) {
+            this.map.moveLayer(`${targetlayerId}-additional-${index}`, beforLayerId);
+          } else {
+            break;
+          }
+        }
+        if (this.map.getLayer(`${targetlayerId}-label`)) {
+          this.map.moveLayer(`${targetlayerId}-label`);
+        }
       }
+
       this.triggerEvent('addlayerssucceeded', {
         map: this.map,
         mapparams: this.mapParams,
@@ -1410,9 +2194,23 @@ export default class WebMapViewModel extends WebMapBase {
         newObj['fill-color'] = expression;
       }
     }
-    if (style.lineDash && style.lineDash !== 'solid' && type === 'LINE') {
-      newObj['line-dasharray'] = this.getDashStyle(style.lineDash);
+    if (style.lineDash && !newObj['line-dasharray']) {
+      if (Array.isArray(style['lineDash'])) {
+        newObj['line-dasharray'] = style['lineDash'];
+      } else if (style.lineDash !== 'solid' && type === 'LINE') {
+        newObj['line-dasharray'] = this.getDashStyle(style.lineDash);
+      }
     }
+    if (style.lineDash && !newObj['circle-translate']) {
+      if (Array.isArray(style['circleTranslate'])) {
+        newObj['circle-translate'] = style['circleTranslate'];
+      } else if (style.type === 'POINT' || style.type === 'BASIC_POINT' || type === 'POINT') {
+        const offsetX = style.offsetX || 0;
+        const offsetY = style.offsetY || 0;
+        newObj['circle-translate'] = [offsetX * style['radius'], offsetY * style['radius']];
+      }
+    }
+
     return newObj;
   }
 
@@ -1427,7 +2225,10 @@ export default class WebMapViewModel extends WebMapBase {
     type: layerType,
     source: mapboxglTypes.GeoJSONSourceRaw,
     layerID: string,
-    layerStyle: any
+    layerStyle: any,
+    minzoom: number,
+    maxzoom: number,
+    filter?: string
   ): void {
     let mbglTypeMap = {
       POINT: 'circle',
@@ -1436,13 +2237,19 @@ export default class WebMapViewModel extends WebMapBase {
     };
     let mbglType = mbglTypeMap[type];
     if (mbglType === 'circle' || mbglType === 'line' || mbglType === 'fill') {
-      this._addLayer({
+      const style: any = {
         id: layerID,
         type: mbglType,
         source: source,
         paint: layerStyle.style,
-        layout: layerStyle.layout || {}
-      });
+        layout: layerStyle.layout || {},
+        minzoom: minzoom || 0,
+        maxzoom: maxzoom || 22
+      };
+      if (filter) {
+        style.filter = filter;
+      }
+      this._addLayer(style);
     }
   }
 
@@ -1452,17 +2259,25 @@ export default class WebMapViewModel extends WebMapBase {
     visibility = true,
     minzoom = 0,
     maxzoom = 22,
-    isIserver = false
+    isIserver = false,
+    bounds?
   ): void {
     let source: mapboxglTypes.RasterSource = {
       type: 'raster',
       tiles: url,
-      tileSize: 256,
+      tileSize: isIserver ? this.rasterTileSize : 256,
       // @ts-ignore
       rasterSource: isIserver ? 'iserver' : '',
       // @ts-ignore
-      prjCoordSys: isIserver ? { epsgCode: this.baseProjection.split(':')[1] } : ''
+      prjCoordSys:
+        isIserver && !this.isOnlineBaseLayer(url[0], this.baseProjection)
+          ? { epsgCode: this.baseProjection.split(':')[1] }
+          : '',
+      proxy: this.baseLayerProxy
     };
+    if (bounds) {
+      source.bounds = bounds;
+    }
     this._addLayer({
       id: layerID,
       type: 'raster',
@@ -1473,6 +2288,7 @@ export default class WebMapViewModel extends WebMapBase {
         visibility: visibility ? 'visible' : 'none'
       }
     });
+    this.baseLayerProxy = null;
   }
   /**
    * @private
@@ -1480,14 +2296,21 @@ export default class WebMapViewModel extends WebMapBase {
    * @description 添加面的边框。
    * @param {Object} style - mabgl style
    */
-  private _addStrokeLineForPoly(style: any, source: any, layerID: string, visible: boolean): void {
+  private _addStrokeLineForPoly(
+    style: any,
+    source: any,
+    layerID: string,
+    visible: boolean,
+    minzoom: number,
+    maxzoom: number
+  ): void {
     let lineStyle = {
       style: this._transformStyleToMapBoxGl(style, 'LINE'),
       layout: {
         visibility: visible
       }
     };
-    this._addOverlayToMap('LINE', source, layerID, lineStyle);
+    this._addOverlayToMap('LINE', source, layerID, lineStyle, minzoom, maxzoom);
   }
 
   private _initLegendConfigInfo(layerInfo: any, style: any): void {
@@ -1507,6 +2330,7 @@ export default class WebMapViewModel extends WebMapBase {
     let paint = this._transformStyleToMapBoxGl(style, featureType);
     let url = info.url + '/tileFeature.mvt';
     let origin = mapboxgl.CRS.get(this.baseProjection).getOrigin();
+    const { minzoom, maxzoom } = layerInfo;
     url += `?&returnAttributes=true&width=512&height=512&x={x}&y={y}&scale={scale}&origin={x:${origin[0]},y:${origin[1]}}`;
     this._addLayer({
       id: layerInfo.layerID,
@@ -1514,13 +2338,16 @@ export default class WebMapViewModel extends WebMapBase {
       type: style.mbglType,
       source: {
         type: 'vector',
-        tiles: [url]
+        tiles: [url],
+        proxy: this.webMapService.handleProxy('image')
       },
       'source-layer': `${info.datasetName}@${info.datasourceName}`,
       paint,
       layout: {
         visibility: layerInfo.visible ? 'visible' : 'none'
-      }
+      },
+      minzoom: minzoom || 0,
+      maxzoom: maxzoom || 22
     });
     this._addLayerSucceeded();
   }
@@ -1549,13 +2376,19 @@ export default class WebMapViewModel extends WebMapBase {
   }
 
   _unproject(point: [number, number]): [number, number] {
+    const sourceProjection = this._unprojectProjection || this.baseProjection;
+    if (sourceProjection === 'EPSG:4326') {
+      return point;
+    }
     // @ts-ignore
-    return proj4(
-      this._unprojectProjection || this.baseProjection,
-      this.baseProjection === 'EPSG:3857' ? 'EPSG:4326' : this.baseProjection,
-      point
-    );
+    const coor = proj4(sourceProjection, 'EPSG:4326', point);
+    const proj = proj4.defs(sourceProjection);
+    if (proj.axis && proj.axis.indexOf('ne') === 0) {
+      coor.reverse();
+    }
+    return coor;
   }
+
   private _getMapCenter(mapInfo) {
     // center
     let center: [number, number] | mapboxglTypes.LngLat;
@@ -1564,9 +2397,7 @@ export default class WebMapViewModel extends WebMapBase {
     if (!center) {
       center = [0, 0];
     }
-    if (this.baseProjection === 'EPSG:3857') {
-      center = this._unproject(center);
-    }
+    center = this._unproject(center);
 
     center = new mapboxgl.LngLat(center[0], center[1]);
 
@@ -1644,32 +2475,89 @@ export default class WebMapViewModel extends WebMapBase {
     return tiandituUrls;
   }
 
-  private _defineProj4(epsgCode) {
-    const defName = `EPSG:${epsgCode}`;
-    const defValue = this.webMapService.getEpsgcodeWkt(defName);
-    if (!defValue) {
-      console.error(`${defName} not define`);
-    } else {
-      proj4.defs(defName, defValue);
+  private _defineProj4(projection: string) {
+    let epsgCode = projection;
+    let epsgValue: string;
+    if (!projection.split(':')[1]) {
+      epsgCode = toEpsgCode(projection);
+      epsgValue = projection;
     }
+    const defaultValue = getProjection(epsgCode);
+    const defValue = epsgValue || defaultValue;
+
+    if (!defValue) {
+      console.error(`${epsgCode} not define`);
+    } else {
+      !proj4.defs(epsgCode) && proj4.defs(epsgCode, defValue);
+      !defaultValue && registerProjection(epsgCode, defValue);
+    }
+    return epsgCode;
   }
 
   private _addLayer(layerInfo) {
     const { id } = layerInfo;
-    Array.isArray(this._cacheLayerId) && this._cacheLayerId.push(id);
+    this._cacheLayerId.push(id);
     layerInfo = Object.assign(layerInfo, { id });
+
+    if (this.map.getLayer(id)) {
+      if (this.checkSameLayer && this._isSameRasterLayer(id, layerInfo)) return;
+      this._updateLayer(layerInfo);
+      return;
+    }
     this.map.addLayer(layerInfo);
+  }
+
+  private _isSameRasterLayer(id, layerInfo) {
+    let {
+      source: { type, tiles }
+    } = layerInfo;
+    if (type === 'raster') {
+      let source = this.map.getSource(id);
+      if (
+        type === source.type &&
+        tiles &&
+        // @ts-ignore
+        source.tiles &&
+        // @ts-ignore
+        tiles[0] === source.tiles[0]
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public setLayersVisible(isShow, ignoreIds) {
+    let show = isShow ? 'visible' : 'none';
+    if (this._cacheLayerId.length) {
+      this._cacheLayerId.forEach(layerId => {
+        if ((ignoreIds && !ignoreIds.includes(layerId)) || !ignoreIds) {
+          this.map.setLayoutProperty(layerId, 'visibility', show);
+        }
+      });
+    }
   }
 
   cleanWebMap() {
     if (this.map) {
+      this.triggerEvent('beforeremovemap', {});
       this.map.remove();
       this.map = null;
       this._legendList = {};
+      this._sourceListModel = null;
       this.center = null;
       this.zoom = null;
-      this._dataflowService && this._dataflowService.off('messageSucceeded', this._handleDataflowFeaturesCallback);
+      this._layers = [];
+      this._dataflowService &&
+        this._dataflowService.off('messageSucceeded', this._handleDataflowFeaturesCallback) &&
+        this._dataflowService.off('subscribesucceeded', this._initDataflowLayerCallback);
       this._unprojectProjection = null;
+    }
+    if (this._layerTimerList.length) {
+      this._layerTimerList.forEach(timer => {
+        clearInterval(timer);
+      });
+      this._layerTimerList = [];
     }
   }
 
@@ -1690,5 +2578,65 @@ export default class WebMapViewModel extends WebMapBase {
       return Math.max(bounds.rightTop.x - bounds.leftBottom.x, bounds.rightTop.y - bounds.leftBottom.y) / tileSize;
     }
     return Math.max(bounds[2] - bounds[0], bounds[3] - bounds[1]) / tileSize;
+  }
+
+  private _transformScaleToZoom(scale, crs?) {
+    let scale_0 = 295829515.2024169;
+    //@ts-ignore
+    if ((crs || this.map.getCRS()).epsgCode !== 'EPSG:3857') {
+      scale_0 = 295295895;
+    }
+    const scaleDenominator = scale.split(':')[1];
+    return Math.min(24, +Math.log2(scale_0 / +scaleDenominator).toFixed(2));
+  }
+
+  private _updateLayer(layerInfo) {
+    const {
+      id,
+      paint,
+      source: { type, tiles, data, proxy }
+    } = layerInfo;
+    const source = this.map.getSource(id);
+    if (source) {
+      if (type === 'geojson') {
+        Object.keys(paint).forEach(name => {
+          this.map.setPaintProperty(id, name, paint[name]);
+        });
+        // @ts-ignore
+        source.setData(data);
+      } else if (type === 'raster') {
+        this._updateRasterSource(id, { proxy, tiles });
+      }
+    }
+  }
+
+  _updateRasterSource(sourceId, options) {
+    if (!sourceId) {
+      return;
+    }
+    let source = this.map.getSource(sourceId);
+
+    Object.assign(source, options);
+    // @ts-ignore
+    this.map.style.sourceCaches[sourceId].clearTiles();
+    // @ts-ignore
+    this.map.style.sourceCaches[sourceId].update(this.map.transform);
+    // @ts-ignore
+    this.map.triggerRepaint();
+  }
+
+  updateOverlayLayer(layerInfo: any, features: any, mergeByField?: string) {
+    if (features) {
+      this._initOverlayLayer(layerInfo, features, mergeByField);
+    } else {
+      const type = this.webMapService.getDatasourceType(layerInfo);
+      this.getLayerFeatures(layerInfo, this._taskID, type);
+    }
+  }
+  isOnlineBaseLayer(url, projection) {
+    return (
+      url.startsWith('https://maptiles.supermapol.com/iserver/services/map_China/rest/maps/China_Dark') &&
+      projection === 'EPSG:3857'
+    );
   }
 }

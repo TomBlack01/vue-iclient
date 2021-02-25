@@ -1,85 +1,23 @@
 <template>
-  <div :id="target" class="sm-component-web-map">
+  <div :id="target" class="sm-component-web-map" :style="[{'background': background}]">
     <slot></slot>
-    <Pan v-if="panControl.show" :position="panControl.position" />
-    <Scale v-if="scaleControl.show" v-bind="scaleControl" />
-    <Zoom v-if="zoomControl.show" v-bind="zoomControl" />
-    <mini-map v-if="miniMapControl.show" v-bind="miniMapControl"></mini-map>
-    <layer-list v-if="layerListControl.show" v-bind="layerListControl"></layer-list>
-    <Measure v-if="measureControl.show" v-bind="measureControl"></Measure>
-    <Legend v-if="legendControl.show" v-bind="legendControl"></Legend>
-    <Query v-if="queryControl.show" v-bind="queryControl"></Query>
-    <Search v-if="searchControl.show" v-bind="searchControl"></Search>
-    <Identify v-if="identifyControl.show" v-bind="identifyControl"></Identify>
-    <LayerManager v-if="layerManagerControl.show" v-bind="layerManagerControl"></LayerManager>
-    <a-spin v-if="spinning" size="large" :tip="$t('webmap.loadingTip')" :spinning="spinning" />
+    <template v-for="(controlProps, controlName) in controlComponents">
+      <component :is="controlName" :key="controlName" v-bind="controlProps"></component>
+    </template>
+    <sm-spin v-if="spinning" size="large" :tip="$t('webmap.loadingTip')" :spinning="spinning" />
   </div>
 </template>
 
-<script lang='ts'>
+<script lang="ts">
 import WebMapViewModel from './WebMapViewModel';
 import mapEvent from '../_types/map-event';
-import VmUpdater from '../../common/_mixin/vm-updater';
+import VmUpdater from '../../common/_mixin/VmUpdater';
 import MapEvents from './_mixin/map-events';
-import Pan from './control/pan/Pan.vue';
-import Scale from './control/scale/Scale.vue';
-import Zoom from './control/zoom/Zoom.vue';
-import MiniMap from './control/mini-map/MiniMap.vue';
-import LayerList from './control/layer-list/LayerList.vue';
-import Measure from './control/measure/Measure.vue';
-import Legend from './control/legend/Legend.vue';
-import Query from '../query/Query.vue';
-import Search from '../search/Search.vue';
-import Identify from './control/identify/Identify.vue';
-import LayerManager from './control/layer-manager/LayerManager.vue';
 import { Component, Prop, Mixins, Emit, Watch, Provide } from 'vue-property-decorator';
 import { addListener, removeListener } from 'resize-detector';
 import debounce from 'lodash/debounce';
+import SmSpin from '../../common/spin/Spin.vue';
 
-/**
- * @module WebMap
- * @category Components
- * @desc web 地图组件。支持MapboxGL map，和对接 iPortal/Online 地图。目前支持地图坐标系包括：'EPSG:3857'，'EPSG:4326'，'EPSG:4490'，'EPSG:4214'，'EPSG:4610'。
- * @vue-prop {Object} [mapOptions] - {@link MapboxGL map options[https://docs.mapbox.com/mapbox-gl-js/api/#map]} 对象。
- * @vue-prop {String} [mapId] - SuperMap iPortal|Online 地图 ID。当设置 `mapId` 时为加载iPortal/Online 地图，mapOptions中仅 `mapOptions.center` `mapOptions.zoom` `mapOptions.maxBounds` `mapOptions.minZoom` `mapOptions.maxZoom` `mapOptions.renderWorldCopies` `mapOptions.bearing` `mapOptions.pitch` 有效。
- * @vue-prop {String} [target='map'] - 地图容器 ID。
- * @vue-prop {String} [serverUrl='https://www.supermapol.com'] - iPortal/Online 服务器地址。当设置 `mapId` 时有效。
- * @vue-prop {String} [accessKey] - 用于访问 SuperMap iPortal、SuperMap Online 中受保护的服务。当设置 `mapId` 时有效。
- * @vue-prop {String} [accessToken] - SuperMap iServer 提供的一种基于 Token（令牌）的用户身份验证机制。当设置 `mapId` 时有效。
- * @vue-prop {String} [tiandituKey] - 用于访问天地图的服务。当设置 `mapId` 时有效。
- * @vue-prop {String} [withCredentials=false] - 请求是否携带 cookie。当设置 `mapId` 时有效。
- * @vue-prop {String} [excludePortalProxyUrl] - server 传递过来的 URL 是否带有代理。当设置 `mapId` 时有效。
- * @vue-prop {Boolean} [autoresize = true] - 用来指定 webmap 实例在组件根元素尺寸变化时是否需要自动进行重绘,需要设置webmap组件样式为width:100%, height:100%。
- * @vue-prop {Object} [panControl] - 位移组件配置参数。
- * @vue-prop {Boolean} [panControl.show=false] - 是否显示位移组件。
- * @vue-prop {String} [panControl.position="top-left"] - 位移组件放置位置。
- * @vue-prop {Object} [scaleControl] - 比例尺组件配置参数。
- * @vue-prop {Boolean} [scaleControl.show=false] - 是否显示比例尺组件。
- * @vue-prop {String} [scaleControl.position="bottom-left"] - 比例尺组件放置位置。
- * @vue-prop {Object} [zoomControl] - 缩放组件配置参数。
- * @vue-prop {Boolean} [zoomControl.show=false] - 是否显示缩放组件。
- * @vue-prop {String} [zoomControl.position="top-left"] - 缩放组件放置位置。
- * @vue-prop {Boolean} [zoomControl.showZoomSlider="false"] - 缩放组件是否含有滑动条。
- * @vue-prop {Object} [miniMapControl] - 鹰眼组件配置参数。
- * @vue-prop {Boolean} [miniMapControl.show=false] - 是否显示鹰眼组件。
- * @vue-prop {String} [miniMapControl.position="bottom-right"] - 鹰眼组件放置位置。
- * @vue-prop {Object} [layerListControl] - 图层列表组件配置参数。
- * @vue-prop {Boolean} [layerListControl.show=false] - 是否显示图层列表组件。
- * @vue-prop {String} [layerListControl.position="top-right"] - 图层列表组件放置位置。
- * @vue-prop {Object} [measureControl] - 量算组件配置参数。
- * @vue-prop {Boolean} [measureControl.show=false] - 是否显示量算组件。
- * @vue-prop {String} [measureControl.position="top-right"] -  量算组件放置位置。
- * @vue-prop {String} [measureControl.distanceDefaultUnit="kilometers"] -  量算距离的默认单位。
- * @vue-prop {String} [measureControl.areaDefaultUnit="kilometers"] -  量算面积的默认单位。
- * @vue-prop {Object} [legendControl] - 图例组件配置参数。
- * @vue-prop {Boolean} [legendControl.show=false] - 是否显示图例组件。
- * @vue-prop {String} [legendControl.position="bottom-left"] -  图例组件放置位置。
- * @vue-prop {String} [legendControl.layerNames] -  显示图例组件的图层。
- * @vue-prop {String} [legendControl.isShowTitle="false"] -  图例组件是否显示图层名称。
- * @vue-prop {String} [legendControl.isShowField="false"] -  图例组件是否显示专题字段。
- * @vue-prop {String} [legendControl.mode="simple"] -  图例组件面板样式，支持"simple"(透明模式)/"panel"(面板模式)两种模式，默认为simple。
- * @vue-computed {String} getMapTarget - 获取 Map 的 target。
- */
 interface commonControlParam {
   show?: boolean;
   position?: string;
@@ -140,8 +78,25 @@ interface layerManageParam {
   layers?: Array<Object>;
 }
 
+interface controlProps {
+  panControl?: commonControlParam;
+  scaleControl?: commonControlParam;
+  zoomControl?: zoomParam;
+  miniMapControl?: cardCommonParam;
+  layerListControl?: cardCommonParam;
+  measureControl?: measureParam;
+  legendControl?: legendParam;
+  queryControl?: queryParam;
+  searchControl?: searchParam;
+  identifyControl?: identifyParam;
+  layerManagerControl?: layerManageParam;
+}
+
 @Component({
   name: 'SmWebMap',
+  components: {
+    SmSpin
+  },
   viewModelProps: [
     'mapId',
     'serverUrl',
@@ -155,21 +110,10 @@ interface layerManageParam {
     'mapOptions.renderWorldCopies',
     'mapOptions.bearing',
     'mapOptions.pitch',
-    'withCredentials'
-  ],
-  components: {
-    Pan,
-    Scale,
-    Zoom,
-    MiniMap,
-    LayerList,
-    Measure,
-    Legend,
-    Query,
-    Search,
-    Identify,
-    LayerManager
-  }
+    'mapOptions.rasterTileSize',
+    'withCredentials',
+    'proxy'
+  ]
 })
 class SmWebMap extends Mixins(VmUpdater, MapEvents) {
   spinning = true;
@@ -177,10 +121,11 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
   // eslint-disable-next-line
   map: mapboxglTypes.Map;
   viewModel: WebMapViewModel;
+  $message: any;
   // data
   @Provide() __resizeHandler;
 
-  @Prop() mapId: string;
+  @Prop() mapId: string | number;
   @Prop({ default: 'map' }) target: string;
   @Prop({ default: 'https://www.supermapol.com' }) serverUrl: string;
   @Prop() accessToken: string;
@@ -189,9 +134,15 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
   @Prop({ default: false }) withCredentials: boolean;
   @Prop() excludePortalProxyUrl: boolean;
   @Prop() isSuperMapOnline: boolean;
+  @Prop() proxy: boolean | string;
+  @Prop({ default: true }) defaultLoading: boolean;
+  @Prop({ default: false }) loading: boolean;
+  @Prop() background: string;
+  @Prop() iportalServiceProxyUrlPrefix: string;
   @Prop()
   mapOptions: any;
   @Prop({ default: true }) autoresize: boolean;
+  @Prop({ default: false }) keepBounds: boolean;
   @Prop({
     default: () => {
       return { show: false, position: 'top-left' };
@@ -299,7 +250,20 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
 
   @Watch('mapId')
   mapIdChanged() {
-    this.spinning = true;
+    if (this.defaultLoading) {
+      this.spinning = true;
+    }
+  }
+
+  @Watch('loading')
+  loadingChanged(newVal) {
+    this.spinning = newVal;
+  }
+
+  created() {
+    if (!this.defaultLoading) {
+      this.spinning = false;
+    }
   }
 
   mounted() {
@@ -309,8 +273,12 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
 
   beforeDestroy() {
     this.destory();
+  }
+
+  destroyed() {
     mapEvent.$options.deleteMap(this.target);
     mapEvent.$options.deleteWebMap(this.target);
+    this.viewModel.cleanWebMap();
   }
 
   /* emit */
@@ -334,6 +302,18 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
     return this.target;
   }
 
+  get controlComponents(): controlProps {
+    const controls: controlProps = {};
+    for (let key in this.$props) {
+      if (key.includes('Control') && this.$props[key].show) {
+        const controlName = key.replace('Control', '');
+        const firstLetter = controlName[0];
+        controls[`Sm${controlName.replace(firstLetter, firstLetter.toUpperCase())}`] = this.$props[key];
+      }
+    }
+    return controls;
+  }
+
   /* methods */
   initializeWebMap(): void {
     let {
@@ -345,7 +325,9 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
       withCredentials,
       excludePortalProxyUrl,
       isSuperMapOnline,
-      mapOptions
+      proxy,
+      mapOptions,
+      iportalServiceProxyUrlPrefix
     } = this.$props;
     this.viewModel = new WebMapViewModel(
       this.mapId,
@@ -357,7 +339,9 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
         tiandituKey,
         withCredentials,
         excludePortalProxyUrl,
-        isSuperMapOnline
+        isSuperMapOnline,
+        proxy,
+        iportalServiceProxyUrlPrefix
       },
       mapOptions
     );
@@ -376,7 +360,7 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
 
   resize() {
     if (this.viewModel && this.viewModel.resize) {
-      this.viewModel.resize();
+      this.viewModel.resize(this.keepBounds);
     }
   }
 
@@ -425,6 +409,10 @@ class SmWebMap extends Mixins(VmUpdater, MapEvents) {
       },
       notsupportbaidumap: () => {
         this.$message.error(this.$t('webmap.baiduMapNotSupport'));
+      },
+      beforeremovemap: () => {
+        mapEvent.$options.deleteMap(this.target);
+        mapEvent.$options.deleteWebMap(this.target);
       }
     });
   }

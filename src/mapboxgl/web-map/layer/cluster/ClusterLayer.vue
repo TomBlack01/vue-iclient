@@ -3,7 +3,6 @@ import MapGetter from '../../../_mixin/map-getter';
 import ClusterLayerViewModel from './ClusterLayerViewModel';
 import Layer from '../../../_mixin/layer';
 import CircleStyle from '../../../_types/CircleStyle';
-import isEqual from 'lodash.isequal';
 
 export default {
   name: 'SmClusterLayer',
@@ -13,13 +12,13 @@ export default {
       type: Object,
       required: true
     },
+    maxzoom: {
+      type: Number,
+      default: 14
+    },
     radius: {
       type: Number,
       default: 50
-    },
-    maxZoom: {
-      type: Number,
-      default: 14
     },
     clusteredPointStyle: {
       type: Object,
@@ -47,7 +46,7 @@ export default {
   },
   watch: {
     data(newVal, oldVal) {
-      if (!isEqual(newVal, oldVal) && this.viewModel) {
+      if (this.viewModel) {
         this.viewModel.setData(this.data);
       }
     },
@@ -61,10 +60,10 @@ export default {
       this.viewModel && this.viewModel.setClusteredPointTextLayout(this.clusteredPointTextLayout);
     }
   },
-  loaded() {
+  created() {
     let options = JSON.parse(JSON.stringify(this.$props));
     delete options.data;
-    this.viewModel = new ClusterLayerViewModel(this.map, this.data, { ...options });
+    this.viewModel = new ClusterLayerViewModel(this.data, { ...options });
   },
   render() {}
 };

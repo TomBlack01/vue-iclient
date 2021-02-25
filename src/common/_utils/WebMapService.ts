@@ -1,9 +1,13 @@
 import { Events } from '../_types/event/Events';
-import { isXField, isYField } from './util';
-import epsgCodes from '../web-map/config/epsg.json';
+import { isXField, isYField, urlAppend } from './util';
 import * as convert from 'xml-js';
 
-const DEFAULT_WELLKNOWNSCALESET = ['GoogleCRS84Quad', 'GoogleMapsCompatible'];
+const DEFAULT_WELLKNOWNSCALESET = [
+  'GoogleCRS84Quad',
+  'GoogleMapsCompatible',
+  'urn:ogc:def:wkss:OGC:1.0:GoogleMapsCompatible',
+  'urn:ogc:def:wkss:OGC:1.0:GoogleCRS84Quad'
+];
 const MB_SCALEDENOMINATOR_3857 = [
   '559082264.0287178',
   '279541132.0143589',
@@ -16,7 +20,6 @@ const MB_SCALEDENOMINATOR_3857 = [
   '2183915.093862179',
   '1091957.546931089',
   '545978.7734655447',
-  '272989.7734655447',
   '272989.3867327723',
   '136494.6933663862',
   '68247.34668319309',
@@ -53,11 +56,14 @@ interface webMapOptions {
   tiandituKey?: string;
   withCredentials?: boolean;
   excludePortalProxyUrl?: boolean;
+  proxy?: boolean | string;
+  iportalServiceProxyUrlPrefix?: string;
 }
 
 export default class WebMapService extends Events {
+  mapId: string | number;
 
-  mapId: string;
+  mapInfo: any;
 
   serverUrl: string;
 
@@ -75,18 +81,33 @@ export default class WebMapService extends Events {
 
   isSuperMapOnline: boolean;
 
-  constructor(mapId: string, options: webMapOptions = {}) {
+  proxy: boolean | string;
+
+  iportalServiceProxyUrl: string;
+
+  proxyOptions: object = {
+    data: 'apps/viewer/getUrlResource.json?url=',
+    image: 'apps/viewer/getUrlResource.png?url='
+  };
+
+  constructor(mapId: string | number | object, options: webMapOptions = {}) {
     super();
-    this.mapId = mapId;
+    if (typeof mapId === 'string' || typeof mapId === 'number') {
+      this.mapId = mapId;
+    } else if (mapId !== null && typeof mapId === 'object') {
+      this.mapInfo = mapId;
+    }
     this.serverUrl = options.serverUrl || 'https://www.supermapol.com';
     this.accessToken = options.accessToken;
     this.accessKey = options.accessKey;
     this.tiandituKey = options.tiandituKey || '';
     this.withCredentials = options.withCredentials || false;
     this.excludePortalProxyUrl = options.excludePortalProxyUrl;
+    this.iportalServiceProxyUrl = options.iportalServiceProxyUrlPrefix;
+    this.proxy = options.proxy;
   }
 
-  public setMapId(mapId: string): void {
+  public setMapId(mapId: string | number): void {
     this.mapId = mapId;
   }
 
@@ -96,6 +117,10 @@ export default class WebMapService extends Events {
 
   public setWithCredentials(withCredentials) {
     this.withCredentials = withCredentials;
+  }
+
+  public setProxy(proxy) {
+    this.proxy = proxy;
   }
 
   public handleServerUrl(serverUrl) {
@@ -108,32 +133,71 @@ export default class WebMapService extends Events {
   }
 
   public getMapInfo() {
-    let mapUrl = this._handleMapUrl();
-    return new Promise((resolve, reject) => {
-      SuperMap.FetchRequest.get(mapUrl, null, {
-        withCredentials: this.withCredentials
-      }).then(response => {
-        return response.json();
-      }).then(mapInfo => {
-
-        if (mapInfo && mapInfo.succeed === false) {
-          let error = { message: mapInfo && mapInfo.error && mapInfo.error.errorMsg };
-          reject(error)
-          return;
-        }
-
-        mapInfo.mapParams = {
-          title: mapInfo.title,
-          description: mapInfo.description
-        }
-        resolve(mapInfo);
-
-      }).catch(error => {
-        reject(error)
+    if (!this.mapId && this.mapInfo) {
+      return new Promise(resolve => {
+        resolve(this.mapInfo);
       });
-    })
-  }
+    }
+    let mapUrl = this._handleMapUrl();
+    return new Promise(async (resolve, reject) => {
+      try {
+        await this.getiPortalServiceProxy();
+        SuperMap.FetchRequest.get(mapUrl, null, {
+          withCredentials: this.withCredentials
+        })
+          .then(response => {
+            return response.json();
+          })
+          .then(mapInfo => {
+            if (mapInfo && mapInfo.succeed === false) {
+              let error = { message: mapInfo && mapInfo.error && mapInfo.error.errorMsg };
+              reject(error);
+              return;
+            }
 
+            mapInfo.mapParams = {
+              title: mapInfo.title,
+              description: mapInfo.description
+            };
+            resolve(mapInfo);
+          })
+          .catch(error => {
+            reject(error);
+          });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+  public getiPortalServiceProxy() {
+    return new Promise((resolve, reject) => {
+      SuperMap.FetchRequest.get(`${this.serverUrl}web/config/portal.json`, { scope: ['serviceProxy'] })
+        .then(response => {
+          return response.json();
+        })
+        .then(serviceProxyInfo => {
+          if (!serviceProxyInfo || !serviceProxyInfo.serviceProxy) {
+            reject('serviceProxyFailed');
+            return;
+          }
+          const serviceProxy = serviceProxyInfo.serviceProxy;
+          if (serviceProxy.enable) {
+            if (serviceProxy.proxyServerRootUrl) {
+              this.iportalServiceProxyUrl = serviceProxy.proxyServerRootUrl;
+            } else if (serviceProxy.port && serviceProxy.rootUrlPostfix) {
+              this.iportalServiceProxyUrl = `${serviceProxy.port}/${serviceProxy.rootUrlPostfix}`;
+            }
+            if (this.serverUrl.indexOf(this.iportalServiceProxyUrl) > -1) {
+              this.iportalServiceProxyUrl = '';
+            }
+          }
+          resolve(serviceProxy);
+        })
+        .catch(error => {
+          reject(error);
+        });
+    });
+  }
   public getLayerFeatures(type, layer, baseProjection?) {
     let pro;
     switch (type) {
@@ -142,7 +206,7 @@ export default class WebMapService extends Events {
         pro = this._getFeaturesFromHosted(layer, baseProjection);
         break;
       case 'rest_data':
-        pro = this._getFeaturesFromRestData(layer);
+        pro = this._getFeaturesFromRestData(layer, baseProjection);
         break;
       case 'rest_map':
         pro = this._getFeaturesFromRestMap(layer);
@@ -150,49 +214,113 @@ export default class WebMapService extends Events {
       case 'dataflow':
         pro = this._getFeaturesFromDataflow(layer);
         break;
+      case 'user_data':
+        pro = this._getFeaturesFromUserData(layer);
+        break;
     }
     return pro;
   }
-
-  public getWmtsInfo(mapInfo) {
+  public getWmsInfo(layerInfo, mapCRS) {
     return new Promise((resolve, reject) => {
-      let isMatched = false;
-      let matchMaxZoom = 22;
-
-      SuperMap.FetchRequest.get(mapInfo.url, null, { withCredentials: false, withoutFormatSuffix: true })
+      const proxy = this.handleProxy();
+      const serviceUrl = `${layerInfo.url.split('?')[0]}?REQUEST=GetCapabilities&SERVICE=WMS`;
+      SuperMap.FetchRequest.get(serviceUrl, null, {
+        withCredentials: this.handleWithCredentials(proxy, layerInfo.url, false),
+        withoutFormatSuffix: true,
+        proxy
+      })
         .then(response => {
           return response.text();
         })
         .then(capabilitiesText => {
           let converts = convert || window.convert;
-          let tileMatrixSet = JSON.parse(
+          const capabilities = JSON.parse(
             converts.xml2json(capabilitiesText, {
               compact: true,
               spaces: 4
             })
-          ).Capabilities.Contents.TileMatrixSet;
+          );
+          const wmsCapabilities = capabilities.WMT_MS_Capabilities || capabilities.WMS_Capabilities;
+          resolve({ version: wmsCapabilities['_attributes']['version'] });
+        });
+    });
+  }
+  public getWmtsInfo(layerInfo, mapCRS) {
+    return new Promise((resolve, reject) => {
+      let isMatched = false;
+      let matchMaxZoom = 22;
+      let style = '';
+      let bounds;
+      let restResourceURL = '';
+      let kvpResourceUrl = '';
+      const proxy = this.handleProxy();
+      let serviceUrl = `${layerInfo.url.split('?')[0]}?REQUEST=GetCapabilities&SERVICE=WMTS&VERSION=1.0.0`;
+      serviceUrl = this.handleParentRes(serviceUrl);
+      SuperMap.FetchRequest.get(serviceUrl, null, {
+        withCredentials: this.handleWithCredentials(proxy, layerInfo.url, false),
+        withoutFormatSuffix: true,
+        proxy
+      })
+        .then(response => {
+          return response.text();
+        })
+        .then(capabilitiesText => {
+          let converts = convert || window.convert;
+          const capabilities = JSON.parse(
+            converts.xml2json(capabilitiesText, {
+              compact: true,
+              spaces: 4
+            })
+          ).Capabilities;
+          const content = capabilities.Contents;
+          const metaData = capabilities['ows:OperationsMetadata'];
+          if (metaData) {
+            let operations = metaData['ows:Operation'];
+            if (!Array.isArray(operations)) {
+              operations = [operations];
+            }
+            const operation = operations.find(item => {
+              return item._attributes.name === 'GetTile';
+            });
+            if (operation) {
+              let getConstraints = operation['ows:DCP']['ows:HTTP']['ows:Get'];
+              if (!Array.isArray(getConstraints)) {
+                getConstraints = [getConstraints];
+              }
+              const getConstraint = getConstraints.find(item => {
+                return item['ows:Constraint']['ows:AllowedValues']['ows:Value']['_text'] === 'KVP';
+              });
+              if (getConstraint) {
+                kvpResourceUrl = getConstraint['_attributes']['xlink:href'];
+              }
+            }
+          }
+          let tileMatrixSet = content.TileMatrixSet;
           for (let i = 0; i < tileMatrixSet.length; i++) {
             if (
               tileMatrixSet[i]['ows:Identifier'] &&
-              tileMatrixSet[i]['ows:Identifier']['_text'] === mapInfo.tileMatrixSet
+              tileMatrixSet[i]['ows:Identifier']['_text'] === layerInfo.tileMatrixSet
             ) {
-              if (DEFAULT_WELLKNOWNSCALESET.includes(tileMatrixSet[i]['WellKnownScaleSet']['_text'])) {
-                isMatched = true;
-              } else if (
+              if (
                 tileMatrixSet[i]['WellKnownScaleSet'] &&
-                tileMatrixSet[i]['WellKnownScaleSet']['_text'] === 'Custom'
+                DEFAULT_WELLKNOWNSCALESET.includes(tileMatrixSet[i]['WellKnownScaleSet']['_text'])
               ) {
+                isMatched = true;
+              } else {
                 let matchedScaleDenominator = [];
                 // 坐标系判断
                 let defaultCRSScaleDenominators =
                   // @ts-ignore -------- crs 为 enhance 新加属性
-                  this.map.crs === 'EPSG:3857' ? MB_SCALEDENOMINATOR_3857 : MB_SCALEDENOMINATOR_4326;
+                  mapCRS === 'EPSG:3857' ? MB_SCALEDENOMINATOR_3857 : MB_SCALEDENOMINATOR_4326;
 
                 for (let j = 0, len = defaultCRSScaleDenominators.length; j < len; j++) {
                   if (!tileMatrixSet[i].TileMatrix[j]) {
                     break;
                   }
-                  if (defaultCRSScaleDenominators[j] !== tileMatrixSet[i].TileMatrix[j]['ScaleDenominator']['_text']) {
+                  if (
+                    parseFloat(defaultCRSScaleDenominators[j]) !==
+                    parseFloat(tileMatrixSet[i].TileMatrix[j]['ScaleDenominator']['_text'])
+                  ) {
                     break;
                   }
                   matchedScaleDenominator.push(defaultCRSScaleDenominators[j]);
@@ -203,18 +331,47 @@ export default class WebMapService extends Events {
                 } else {
                   throw Error('TileMatrixSetNotSuppport');
                 }
-              } else {
-                throw Error('TileMatrixSetNotSuppport');
               }
+              break;
             }
           }
-          resolve({ isMatched, matchMaxZoom })
+          const layer = content.Layer.find(item => {
+            return item['ows:Identifier']['_text'] === layerInfo.layer;
+          });
+          if (layer) {
+            let styles = layer.Style;
+            if (Array.isArray(layer.Style)) {
+              style = styles[0]['ows:Identifier'] ? styles[0]['ows:Identifier']['_text'] : '';
+            } else {
+              style = styles['ows:Identifier'] ? styles['ows:Identifier']['_text'] : '';
+            }
+            if (layer['ows:WGS84BoundingBox']) {
+              const lowerCorner = layer['ows:WGS84BoundingBox']['ows:LowerCorner']['_text'].split(' ');
+              const upperCorner = layer['ows:WGS84BoundingBox']['ows:UpperCorner']['_text'].split(' ');
+              bounds = [
+                parseFloat(lowerCorner[0]),
+                parseFloat(lowerCorner[1]),
+                parseFloat(upperCorner[0]),
+                parseFloat(upperCorner[1])
+              ];
+            }
+            let resourceUrls = layer.ResourceURL;
+            if (!Array.isArray(resourceUrls)) {
+              resourceUrls = [resourceUrls];
+            }
+            const resourceUrl = resourceUrls.find(item => {
+              return item._attributes.resourceType === 'tile';
+            });
+            if (resourceUrl) {
+              restResourceURL = resourceUrl._attributes.template;
+            }
+          }
+          resolve({ isMatched, matchMaxZoom, style, bounds, restResourceURL, kvpResourceUrl });
         })
         .catch(error => {
           reject(error);
         });
-    })
-
+    });
   }
 
   private _getFeaturesFromHosted(layer, baseProjection?) {
@@ -223,26 +380,27 @@ export default class WebMapService extends Events {
 
     if (!serverId) {
       return new Promise((resolve, reject) => {
-        resolve({ type: 'noServerId' })
-      })
+        resolve({ type: 'noServerId' });
+      });
     }
-    let getDataFromIportal = layerType === 'MARKER' || (dataSource && (!dataSource.accessType || dataSource.accessType === 'DIRECT'));
+    let getDataFromIportal =
+      layerType === 'MARKER' || (dataSource && (!dataSource.accessType || dataSource.accessType === 'DIRECT'));
 
     if (getDataFromIportal) {
-      return this._getDataFromIportal(serverId);
+      return this._getDataFromIportal(serverId, layer);
     } else {
       return this._getDataFromHosted({ layer, serverId, baseProjection });
     }
   }
 
-  private _getFeaturesFromRestData(layer) {
+  private _getFeaturesFromRestData(layer, baseProjection?) {
     //从restData获取数据
     let features;
     let dataSource = layer.dataSource;
     return new Promise((resolve, reject) => {
       this._getFeatureBySQL(
         dataSource.url,
-        [dataSource.dataSourseName || layer.name],
+        [dataSource.dataSourceName || layer.name],
         result => {
           features = this.parseGeoJsonData2Feature({
             allDatas: {
@@ -253,9 +411,10 @@ export default class WebMapService extends Events {
         },
         err => {
           reject(err);
-        }
+        },
+        baseProjection
       );
-    })
+    });
   }
 
   private _getFeaturesFromRestMap(layer) {
@@ -292,7 +451,39 @@ export default class WebMapService extends Events {
         },
         'smid=1'
       );
-    })
+    });
+  }
+
+  private _getFeaturesFromUserData(layer) {
+    let dataSource = layer.dataSource;
+    return new Promise((resolve, reject) => {
+      const proxy = this.handleProxy();
+      let serviceUrl = this.handleParentRes(dataSource.url);
+      SuperMap.FetchRequest.get(serviceUrl, null, {
+        withCredentials: this.handleWithCredentials(proxy, serviceUrl, this.withCredentials),
+        proxy
+      })
+        .then(response => {
+          return response.json();
+        })
+        .then(data => {
+          let features;
+          if (data && data instanceof Object && data.type === 'FeatureCollection') {
+            features = data.features;
+          } else {
+            features = data;
+          }
+          features = this.parseGeoJsonData2Feature({
+            allDatas: {
+              features
+            }
+          });
+          resolve({ type: 'feature', features });
+        })
+        .catch(err => {
+          reject(err);
+        });
+    });
   }
 
   private _queryFeatureBySQL(
@@ -307,9 +498,21 @@ export default class WebMapService extends Events {
     recordLength?,
     onlyAttribute?
   ): void {
-    let queryBySQLParams = this._getQueryFeaturesParam(layerName, attributeFilter, fields, epsgCode, startRecord, recordLength, onlyAttribute)
+    let queryBySQLParams = this._getQueryFeaturesParam(
+      layerName,
+      attributeFilter,
+      fields,
+      epsgCode,
+      startRecord,
+      recordLength,
+      onlyAttribute
+    );
+    const proxy = this.handleProxy();
+    let serviceUrl = this.handleParentRes(url);
     // @ts-ignore
-    let queryBySQLService = new SuperMap.QueryBySQLService(url, {
+    let queryBySQLService = new SuperMap.QueryBySQLService(serviceUrl, {
+      proxy,
+      withCredentials: this.handleWithCredentials(proxy, url, false),
       eventListeners: {
         processCompleted: data => {
           processCompleted && processCompleted(data);
@@ -345,7 +548,15 @@ export default class WebMapService extends Events {
     );
   }
 
-  private _getQueryFeaturesParam(layerName: string, attributeFilter?: string, fields?: Array<string>, epsgCode?: string, startRecord?, recordLength?, onlyAttribute?) {
+  private _getQueryFeaturesParam(
+    layerName: string,
+    attributeFilter?: string,
+    fields?: Array<string>,
+    epsgCode?: string,
+    startRecord?,
+    recordLength?,
+    onlyAttribute?
+  ) {
     let queryParam = new SuperMap.FilterParameter({
       name: layerName,
       attributeFilter: attributeFilter
@@ -382,13 +593,13 @@ export default class WebMapService extends Events {
       this._getDataflowInfo(
         layer,
         () => {
-          resolve({ type: 'dataflow' })
+          resolve({ type: 'dataflow' });
         },
         e => {
-          reject(e)
+          reject(e);
         }
       );
-    })
+    });
   }
 
   private _getDataflowInfo(layerInfo, success, faild?) {
@@ -399,12 +610,21 @@ export default class WebMapService extends Events {
       token = layerInfo.credential.token;
       requestUrl += `?token=${token}`;
     }
-    SuperMap.FetchRequest.get(requestUrl)
+    const proxy = this.handleProxy();
+    requestUrl = this.handleParentRes(requestUrl);
+    SuperMap.FetchRequest.get(requestUrl, null, {
+      proxy,
+      withCredentials: this.handleWithCredentials(proxy, requestUrl, false)
+    })
       .then(function (response) {
         return response.json();
       })
       .then(function (result) {
-        if (result && result.featureMetaData) {
+        if (!result) {
+          faild();
+          return;
+        }
+        if (result.featureMetaData) {
           layerInfo.featureType = result.featureMetaData.featureType.toUpperCase();
           layerInfo.dataSource = { dataTypes: {} };
           if (result.featureMetaData.fieldInfos && result.featureMetaData.fieldInfos.length > 0) {
@@ -419,13 +639,10 @@ export default class WebMapService extends Events {
               }
             });
           }
-          layerInfo.wsUrl = result.urls[0].url;
-          layerInfo.name = result.urls[0].url.split('iserver/services/')[1].split('/dataflow')[0];
-          success();
-        } else {
-          //失败也要到成功会调函数中，否则不会继续执行
-          faild();
         }
+        layerInfo.wsUrl = result.urls[0].url;
+        layerInfo.name = result.urls[0].url.split('iserver/services/')[1].split('/dataflow')[0];
+        success();
       })
       .catch(function () {
         faild();
@@ -435,18 +652,16 @@ export default class WebMapService extends Events {
   public getDatasourceType(layer) {
     let { dataSource, layerType } = layer;
     if (dataSource && dataSource.type === 'SAMPLE_DATA') {
-      return dataSource.type
+      return dataSource.type;
     }
     let type;
-    let isHosted =
-      (dataSource && dataSource.serverId) ||
-      layerType === 'MARKER' ||
-      layerType === 'HOSTED_TILE';
+    let isHosted = (dataSource && dataSource.serverId) || layerType === 'MARKER' || layerType === 'HOSTED_TILE';
     let isTile =
       layerType === 'SUPERMAP_REST' ||
       layerType === 'TILE' ||
       layerType === 'WMS' ||
-      layerType === 'WMTS';
+      layerType === 'WMTS' ||
+      layerType === 'MAPBOXSTYLE';
     if (isHosted) {
       type = 'hosted';
     } else if (isTile) {
@@ -457,6 +672,8 @@ export default class WebMapService extends Events {
       type = 'rest_map';
     } else if (layerType === 'DATAFLOW_POINT_TRACK' || layerType === 'DATAFLOW_HEAT') {
       type = 'dataflow';
+    } else if (dataSource && dataSource.type === 'USER_DATA') {
+      type = 'user_data';
     }
     return type;
   }
@@ -491,11 +708,7 @@ export default class WebMapService extends Events {
     return features;
   }
 
-  public getEpsgcodeWkt(epsgCode) {
-    return epsgCodes[epsgCode];
-  }
-
-  private _getDataFromIportal(serverId) {
+  private _getDataFromIportal(serverId, layerInfo) {
     let features;
     //原来二进制文件
     let url = `${this.serverUrl}web/datas/${serverId}/content.json?pageSize=9999999&currentPage=1`;
@@ -503,71 +716,82 @@ export default class WebMapService extends Events {
       url = `${url}&${this.accessKey}=${this.accessToken}`;
     }
     return new Promise((resolve, reject) => {
+      url = this.handleParentRes(url);
+      const proxy = this.handleProxy();
       SuperMap.FetchRequest.get(url, null, {
-        withCredentials: this.withCredentials
+        withCredentials: this.handleWithCredentials(proxy, url, this.withCredentials),
+        proxy
       })
         .then(response => {
           return response.json();
         })
-        .then(data => {
+        .then(async data => {
           if (data.succeed === false) {
-            reject(data.error)
+            reject(data.error);
           }
           if (data && data.type) {
             if (data.type === 'JSON' || data.type === 'GEOJSON') {
               data.content = JSON.parse(data.content.trim());
               features = this._formatGeoJSON(data.content);
             } else if (data.type === 'EXCEL' || data.type === 'CSV') {
-              features = this._excelData2Feature(data.content);
+              if (layerInfo.dataSource && layerInfo.dataSource.administrativeInfo) {
+                //行政规划信息
+                data.content.rows.unshift(data.content.colTitles);
+                const { divisionType, divisionField } = layerInfo.dataSource.administrativeInfo;
+                const geojson = await this._excelData2FeatureByDivision(data.content, divisionType, divisionField);
+                features = this._formatGeoJSON(geojson);
+              } else {
+                features = this._excelData2Feature(data.content, (layerInfo && layerInfo.xyField) || {});
+              }
             }
             resolve({ type: 'feature', features });
           }
         })
         .catch(error => {
-          reject(error)
+          reject(error);
         });
-    })
+    });
   }
 
   private _getDataFromHosted({ layer, serverId, baseProjection }) {
     //关系型文件
     let isMapService = layer.layerType === 'HOSTED_TILE';
     return new Promise((resolve, reject) => {
-      this._checkUploadToRelationship(serverId).then(result => {
-        if (result && result.length > 0) {
-          let datasetName = result[0].name,
-            featureType = result[0].type.toUpperCase();
-          this._getDataService(serverId, datasetName).then(data => {
-            let dataItemServices = data.dataItemServices;
-            if (dataItemServices.length === 0) {
-              reject('noDataServices');
-            }
-            let param = { layer, dataItemServices, datasetName, featureType, resolve, reject, baseProjection };
-            if (isMapService) {
-
-              let dataService = dataItemServices.filter(info => {
-                return info && info.serviceType === 'RESTDATA';
-              })[0];
-              this._isMvt(dataService.address, datasetName, baseProjection)
-                .then(info => {
-                  this._getServiceInfoFromLayer(param, info);
-                })
-                .catch(() => {
-                  //判断失败就走之前逻辑，>数据量用tile
-                  this._getServiceInfoFromLayer(param);
-                });
-            } else {
-              this._getServiceInfoFromLayer(param);
-            }
-          });
-        } else {
-          reject('resultIsEmpty');
-        }
-      }).catch(error => {
-        reject(error);
-      });
-    })
-
+      this._checkUploadToRelationship(serverId)
+        .then(result => {
+          if (result && result.length > 0) {
+            let datasetName = result[0].name,
+              featureType = result[0].type.toUpperCase();
+            this._getDataService(serverId, datasetName).then(data => {
+              let dataItemServices = data.dataItemServices;
+              if (dataItemServices.length === 0) {
+                reject('noDataServices');
+              }
+              let param = { layer, dataItemServices, datasetName, featureType, resolve, reject, baseProjection };
+              if (isMapService) {
+                let dataService = dataItemServices.filter(info => {
+                  return info && info.serviceType === 'RESTDATA';
+                })[0];
+                this._isMvt(dataService.address, datasetName, baseProjection)
+                  .then(info => {
+                    this._getServiceInfoFromLayer(param, info);
+                  })
+                  .catch(() => {
+                    //判断失败就走之前逻辑，>数据量用tile
+                    this._getServiceInfoFromLayer(param);
+                  });
+              } else {
+                this._getServiceInfoFromLayer(param);
+              }
+            });
+          } else {
+            reject('resultIsEmpty');
+          }
+        })
+        .catch(error => {
+          reject(error);
+        });
+    });
   }
 
   private _isMvt(serviceUrl, datasetName, baseProjection) {
@@ -590,7 +814,10 @@ export default class WebMapService extends Events {
     });
   }
 
-  private _getServiceInfoFromLayer({ layer, dataItemServices, datasetName, featureType, resolve, reject, baseProjection }, info?: any) {
+  private _getServiceInfoFromLayer(
+    { layer, dataItemServices, datasetName, featureType, resolve, reject, baseProjection },
+    info?: any
+  ) {
     let isMapService = info ? !info.isMvt : layer.layerType === 'HOSTED_TILE',
       isAdded = false;
     dataItemServices.forEach((service, index) => {
@@ -602,37 +829,41 @@ export default class WebMapService extends Events {
         isAdded = true;
         //地图服务,判断使用mvt还是tile
         this._getTileLayerInfo(service.address, baseProjection).then(restMaps => {
-          resolve({ type: 'restMap', restMaps })
+          resolve({ type: 'restMap', restMaps });
         });
       } // TODO 对接 MVT
       else if (service && !isMapService && service.serviceType === 'RESTDATA') {
         if (info && info.isMvt) {
           // this._addVectorLayer(info, layer, featureType);
-          resolve({ type: 'mvt', info, featureType })
+          resolve({ type: 'mvt', info, featureType });
         } else {
           //数据服务
           isAdded = true;
           //关系型文件发布的数据服务
-          this._getDatasources(service.address).then(datasourceName => {
-            layer.dataSource.dataSourceName = datasourceName + ':' + datasetName;
-            layer.dataSource.url = `${service.address}/data`;
-            this._getFeatureBySQL(
-              layer.dataSource.url,
-              [layer.dataSource.dataSourceName || layer.name],
-              result => {
-                let features = this.parseGeoJsonData2Feature({
-                  allDatas: {
-                    features: result.result.features.features
-                  }
-                });
-                resolve({ type: 'feature', features });
-              }, err => {
-                reject(err);
-              }
-            );
-          }, err => {
-            reject(err);
-          });
+          this._getDatasources(service.address).then(
+            datasourceName => {
+              layer.dataSource.dataSourceName = datasourceName + ':' + datasetName;
+              layer.dataSource.url = `${service.address}/data`;
+              this._getFeatureBySQL(
+                layer.dataSource.url,
+                [layer.dataSource.dataSourceName || layer.name],
+                result => {
+                  let features = this.parseGeoJsonData2Feature({
+                    allDatas: {
+                      features: result.result.features.features
+                    }
+                  });
+                  resolve({ type: 'feature', features });
+                },
+                err => {
+                  reject(err);
+                }
+              );
+            },
+            err => {
+              reject(err);
+            }
+          );
         }
       }
     }, this);
@@ -646,7 +877,12 @@ export default class WebMapService extends Events {
     return this._getDatasources(serviceUrl).then(datasourceName => {
       //判断mvt服务是否可用
       let url = `${serviceUrl}/data/datasources/${datasourceName}/datasets/${datasetName}`;
-      return SuperMap.FetchRequest.get(url)
+      const proxy = this.handleProxy();
+      url = this.handleParentRes(url);
+      return SuperMap.FetchRequest.get(url, null, {
+        withCredentials: this.handleWithCredentials(proxy, url, false),
+        proxy
+      })
         .then(response => {
           return response.json();
         })
@@ -663,7 +899,13 @@ export default class WebMapService extends Events {
   }
 
   private _getDatasources(url) {
-    return SuperMap.FetchRequest.get(`${url}/data/datasources.json`)
+    const proxy = this.handleProxy();
+    let serviceUrl = `${url}/data/datasources.json`;
+    serviceUrl = this.handleParentRes(serviceUrl);
+    return SuperMap.FetchRequest.get(serviceUrl, null, {
+      withCredentials: this.handleWithCredentials(proxy, serviceUrl, false),
+      proxy
+    })
       .then(response => {
         return response.json();
       })
@@ -677,8 +919,12 @@ export default class WebMapService extends Events {
   }
 
   private _getDataService(fileId, datasetName) {
-    return SuperMap.FetchRequest.get(`${this.serverUrl}web/datas/${fileId}.json`, null, {
-      withCredentials: this.withCredentials
+    const proxy = this.handleProxy();
+    let serviceUrl = `${this.serverUrl}web/datas/${fileId}.json`;
+    serviceUrl = this.handleParentRes(serviceUrl);
+    return SuperMap.FetchRequest.get(serviceUrl, null, {
+      withCredentials: this.handleWithCredentials(proxy, serviceUrl, this.withCredentials),
+      proxy
     })
       .then(response => {
         return response.json();
@@ -691,8 +937,12 @@ export default class WebMapService extends Events {
   }
 
   private _checkUploadToRelationship(fileId) {
-    return SuperMap.FetchRequest.get(`${this.serverUrl}web/datas/${fileId}/datasets.json`, null, {
-      withCredentials: this.withCredentials
+    const proxy = this.handleProxy();
+    let serviceUrl = `${this.serverUrl}web/datas/${fileId}/datasets.json`;
+    serviceUrl = this.handleParentRes(serviceUrl);
+    return SuperMap.FetchRequest.get(serviceUrl, null, {
+      withCredentials: this.handleWithCredentials(proxy, serviceUrl, this.withCredentials),
+      proxy
     })
       .then(response => {
         return response.json();
@@ -719,6 +969,39 @@ export default class WebMapService extends Events {
     return mapUrl;
   }
 
+  public handleProxy(type?: string): string {
+    if (!this.proxy) {
+      return null;
+    }
+    const proxySuffix: string = this.proxyOptions[type || 'data'];
+    let proxy: string = this.serverUrl + proxySuffix;
+    if (typeof this.proxy === 'string') {
+      proxy = this.proxy;
+    }
+    return proxy;
+  }
+  public handleWithCredentials(proxyUrl?: string, serviceUrl?: string, defaultValue = this.withCredentials): boolean {
+    if (proxyUrl && proxyUrl.startsWith(this.serverUrl) && (!serviceUrl || serviceUrl.startsWith(proxyUrl))) {
+      return true;
+    }
+    if (serviceUrl && this.iportalServiceProxyUrl && serviceUrl.indexOf(this.iportalServiceProxyUrl) >= 0) {
+      return true;
+    }
+
+    return defaultValue;
+  }
+  public isIportalResourceUrl(serviceUrl) {
+    return (
+      serviceUrl.startsWith(this.serverUrl) ||
+      (this.iportalServiceProxyUrl && serviceUrl.indexOf(this.iportalServiceProxyUrl) >= 0)
+    );
+  }
+  public handleParentRes(url, parentResId = this.mapId, parentResType = 'MAP'): string {
+    if (!this.isIportalResourceUrl(url)) {
+      return url;
+    }
+    return urlAppend(url, `parentResType=${parentResType}&parentResId=${parentResId}`);
+  }
   private _formatGeoJSON(data): any {
     let features = data.features;
     features.forEach((row, index) => {
@@ -727,17 +1010,19 @@ export default class WebMapService extends Events {
     return features;
   }
 
-  private _excelData2Feature(dataContent: any): any {
+  private _excelData2Feature(dataContent: any, xyField: any = {}): any {
     let fieldCaptions = dataContent.colTitles;
     // 位置属性处理
-    let xfieldIndex = -1;
-    let yfieldIndex = -1;
-    for (let i = 0, len = fieldCaptions.length; i < len; i++) {
-      if (isXField(fieldCaptions[i])) {
-        xfieldIndex = i;
-      }
-      if (isYField(fieldCaptions[i])) {
-        yfieldIndex = i;
+    let xfieldIndex = fieldCaptions.indexOf(xyField.xField);
+    let yfieldIndex = fieldCaptions.indexOf(xyField.yField);
+    if (yfieldIndex < 0 || xfieldIndex < 0) {
+      for (let i = 0, len = fieldCaptions.length; i < len; i++) {
+        if (isXField(fieldCaptions[i])) {
+          xfieldIndex = i;
+        }
+        if (isYField(fieldCaptions[i])) {
+          yfieldIndex = i;
+        }
       }
     }
 
@@ -752,9 +1037,9 @@ export default class WebMapService extends Events {
 
       // 属性信息
       let attributes = {};
-      for (let index in dataContent.colTitles) {
-        let key = dataContent.colTitles[index];
-        attributes[key] = dataContent.rows[i][index];
+      for (let index = 0; index < dataContent.colTitles.length; index++) {
+        const element = dataContent.colTitles[index].trim();
+        attributes[element] = dataContent.rows[i][index];
       }
       attributes['index'] = i + '';
       // 目前csv 只支持处理点，所以先生成点类型的 geojson
@@ -770,13 +1055,87 @@ export default class WebMapService extends Events {
     }
     return features;
   }
+  private _excelData2FeatureByDivision(content: any, divisionType: string, divisionField: string): Promise<object> {
+    const dataName = ['城市', 'City'].includes(divisionType) ? 'MunicipalData' : 'ProvinceData';
+    if (window[dataName] && window[dataName].features) {
+      return new Promise(resolve => {
+        resolve(this._combineFeature(content, window[dataName], divisionField));
+      });
+    }
+    const dataFileName = ['城市', 'City'].includes(divisionType) ? 'MunicipalData.js' : 'ProvincialData.js';
+    const proxy = this.handleProxy();
+    const dataUrl = `${this.serverUrl}apps/dataviz/libs/administrative_data/${dataFileName}`;
+    return SuperMap.FetchRequest.get(dataUrl, null, {
+      withCredentials: false,
+      proxy,
+      withoutFormatSuffix: true
+    })
+      .then(response => {
+        return response.text();
+      })
+      .then(result => {
+        new Function(result)();
+        return this._combineFeature(content, window[dataName], divisionField);
+      });
+  }
+  private _combineFeature(
+    properties: any,
+    geoData: GeoJSON.FeatureCollection,
+    divisionField: string
+  ): GeoJSON.FeatureCollection {
+    let geojson: GeoJSON.FeatureCollection = {
+      type: 'FeatureCollection',
+      features: []
+    };
+    if (properties.length < 2) {
+      return geojson;
+    } //只有一行数据时为标题
+    let titles = properties.colTitles,
+      rows = properties.rows,
+      fieldIndex = titles.findIndex(title => title === divisionField);
+
+    rows.forEach(row => {
+      let feature = geoData.features.find((item, index) => {
+        return this._isMatchAdministrativeName(item.properties.Name, row[fieldIndex]);
+      });
+      //todo 需提示忽略无效数据
+      if (feature) {
+        const combineFeature: GeoJSON.Feature = { properties: {}, geometry: feature.geometry, type: 'Feature' };
+        row.forEach((item, idx) => {
+          combineFeature.properties[titles[idx]] = item;
+        });
+        geojson.features.push(combineFeature);
+      }
+    });
+    return geojson;
+  }
+  /**
+   * @description 行政区划原始数据和当前数据是否匹配
+   */
+  private _isMatchAdministrativeName(featureName: string, fieldName: string): boolean {
+    if (featureName && typeof fieldName === 'string' && fieldName.constructor === String) {
+      let shortName = featureName.substr(0, 2);
+      // 张家口市和张家界市
+      if (shortName === '张家') {
+        shortName = featureName.substr(0, 3);
+      }
+      // 阿拉善盟 阿拉尔市
+      if (shortName === '阿拉') {
+        shortName = featureName.substr(0, 3);
+      }
+      return !!fieldName.startsWith(shortName);
+    }
+    return false;
+  }
 
   private _getTileLayerInfo(url, baseProjection) {
-    let proxyUrl = this.serverUrl + 'apps/viewer/getUrlResource.json?url=';
-    let requestUrl = proxyUrl + encodeURIComponent(url);
+    const proxy = this.handleProxy();
     let epsgCode = baseProjection.split('EPSG:')[1];
-    return SuperMap.FetchRequest.get(`${requestUrl}/maps.json`, null, {
-      withCredentials: this.withCredentials
+    let serviceUrl = `${url}/maps.json`;
+    serviceUrl = this.handleParentRes(serviceUrl);
+    return SuperMap.FetchRequest.get(serviceUrl, null, {
+      withCredentials: this.handleWithCredentials(proxy, serviceUrl, this.withCredentials),
+      proxy
     })
       .then(response => {
         return response.json();
@@ -786,10 +1145,11 @@ export default class WebMapService extends Events {
         if (mapInfo) {
           mapInfo.forEach(info => {
             let promise = SuperMap.FetchRequest.get(
-              `${proxyUrl}${info.path}.json?prjCoordSys=${JSON.stringify({ epsgCode: epsgCode })}`,
+              `${info.path}.json?prjCoordSys=${JSON.stringify({ epsgCode: epsgCode })}`,
               null,
               {
-                withCredentials: this.withCredentials
+                withCredentials: this.withCredentials,
+                proxy
               }
             )
               .then(response => {
@@ -808,11 +1168,17 @@ export default class WebMapService extends Events {
       });
   }
 
-  private _getFeatureBySQL(url: string, datasetNames: Array<string>, processCompleted: Function, processFaild: Function): void {
+  private _getFeatureBySQL(
+    url: string,
+    datasetNames: Array<string>,
+    processCompleted: Function,
+    processFaild: Function,
+    baseProjection?
+  ): void {
     let getFeatureParam, getFeatureBySQLService, getFeatureBySQLParams;
     getFeatureParam = new SuperMap.FilterParameter({
       name: datasetNames.join().replace(':', '@'),
-      attributeFilter: 'SMID > 0'
+      attributeFilter: null
     });
     getFeatureBySQLParams = new SuperMap.GetFeaturesBySQLParameters({
       queryParameter: getFeatureParam,
@@ -822,7 +1188,17 @@ export default class WebMapService extends Events {
       maxFeatures: -1,
       returnContent: true
     });
+    if (baseProjection) {
+      if (baseProjection === 'EPSG:3857') {
+        getFeatureBySQLParams.targetEpsgCode = 4326;
+      } else {
+        getFeatureBySQLParams.targetEpsgCode = +baseProjection.split(':')[1];
+      }
+    }
+    const proxy = this.handleProxy();
     let options = {
+      proxy,
+      withCredentials: this.handleWithCredentials(proxy, url, false),
       eventListeners: {
         processCompleted: getFeaturesEventArgs => {
           processCompleted && processCompleted(getFeaturesEventArgs);
@@ -832,7 +1208,25 @@ export default class WebMapService extends Events {
         }
       }
     };
-    getFeatureBySQLService = new SuperMap.GetFeaturesBySQLService(url, options);
+    const serviceUrl = this.handleParentRes(url);
+    getFeatureBySQLService = new SuperMap.GetFeaturesBySQLService(serviceUrl, options);
     getFeatureBySQLService.processAsync(getFeatureBySQLParams);
+  }
+
+  public async getEpsgCodeInfo(epsgCode, iPortalUrl) {
+    const url = iPortalUrl.slice(-1) === '/' ? iPortalUrl : `${iPortalUrl}/`;
+    let codeUrl = `${url}epsgcodes/${epsgCode}.json`;
+    const wkt = await SuperMap.FetchRequest.get(codeUrl, null)
+      .then(response => {
+        return response.json();
+      })
+      .then(epsgcodeInfo => {
+        return epsgcodeInfo.wkt;
+      })
+      .catch(err => {
+        console.error(err);
+        return undefined;
+      });
+    return wkt;
   }
 }

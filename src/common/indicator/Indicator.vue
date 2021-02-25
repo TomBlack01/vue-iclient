@@ -1,36 +1,40 @@
 <template>
-  <div class="sm-component-indicator" :style="[getBackgroundStyle, { 'flex-direction': direction }]">
-    <div class="sm-component-indicator__head">
-      <span v-show="showTitleUnit" class="sm-component-indicator__title" :style="[unit_titleStyle, getTextColorStyle]">
-        {{ titleData }}
-      </span>
-    </div>
-    <div class="sm-component-indicator__content">
-      <span class="sm-component-indicator__num" :style="[indicatorStyle]">
-        <countTo
-          v-if="isNumber(indicatorNum)"
-          :decimals="calDecimals"
-          :startVal="startData"
-          :endVal="numData"
-          :duration="Number(duration) || 1000"
-          :separator="separator"
-          :numBackground="numBackground"
-          :numSpacing="numSpacing"
-          :separatorBackground="separatorBackground"
-          :fontSize="fontSize"
-        ></countTo>
-        {{ isNumber(indicatorNum) ? '' : indicatorNum }}
-      </span>
-      <span v-show="showTitleUnit" class="sm-component-indicator__unit" :style="[unit_titleStyle, getTextColorStyle]">{{
-        unitData
-      }}</span>
+  <div class="sm-component-indicator" :style="getBackgroundStyle">
+    <div :class="`sm-component-indicator__content sm-component-indicator__content-${mode}`">
+      <span
+        v-show="showTitleUnit"
+        class="sm-component-indicator__title"
+        :style="[unit_titleStyle, getTextColorStyle]"
+      >{{ titleData }}</span>
+      <div>
+        <span class="sm-component-indicator__num" :style="indicatorStyle">
+          <countTo
+            v-if="isNumber(indicatorNum)"
+            :decimals="calDecimals"
+            :startVal="startData"
+            :endVal="numData"
+            :duration="Number(duration) || 1000"
+            :separator="separator"
+            :numBackground="numBackground"
+            :numSpacing="numSpacing"
+            :separatorBackground="separatorBackground"
+            :fontSize="parseFloat(fontSize) + fontUnit"
+          ></countTo>
+          {{ isNumber(indicatorNum) ? '' : indicatorNum }}
+        </span>
+        <span
+          v-show="showTitleUnit"
+          class="sm-component-indicator__unit"
+          :style="[unit_titleStyle, getTextColorStyle]"
+        >{{ unitData }}</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script>
-import Theme from '../_mixin/theme';
-import Timer from '../_mixin/timer';
+import Theme from '../_mixin/Theme';
+import Timer from '../_mixin/Timer';
 import RestService from '../../common/_utils/RestService';
 import CountTo from './CountTo';
 
@@ -55,6 +59,10 @@ export default {
     },
     indicatorColor: {
       type: String
+    },
+    // title/unit
+    textFontSize: {
+      type: [String, Number]
     },
     fontSize: {
       type: [String, Number]
@@ -103,7 +111,7 @@ export default {
     numBackground: {
       type: Object,
       default: function() {
-        return { color: 'rgba(0, 0, 0, 0)', image: '' };
+        return { color: 'rgba(0, 0, 0, 0)', image: '', padding: 0 };
       }
     },
     separatorBackground: {
@@ -116,7 +124,8 @@ export default {
     },
     titleField: String,
     numField: String,
-    unitField: String
+    unitField: String,
+    thresholdsStyle: Array
   },
   data() {
     return {
@@ -131,17 +140,34 @@ export default {
   computed: {
     unit_titleStyle() {
       return {
-        fontSize: parseFloat(this.fontSize) * 0.66 + this.fontUnit,
+        fontSize: this.textFontSize || parseFloat(this.fontSize) * 0.66 + this.fontUnit,
         fontWeight: this.fontWeight
       };
     },
     fontUnit() {
       const reg = /\d+(\.\d+)?([a-z]+)/gi;
-      const fontUnit = this.fontSize ? this.fontSize.replace(reg, '$2') : '';
+      const fontUnit = this.fontSize && isNaN(this.fontSize) ? this.fontSize.replace(reg, '$2') : 'px';
       return fontUnit;
     },
     indicatorStyle() {
-      let style = { color: this.indicatorColorData };
+      let color = this.indicatorColorData;
+      if (!isNaN(this.indicatorNum) && this.thresholdsStyle) {
+        const matchStyle = this.thresholdsStyle.find(item => {
+          let status;
+          if (item.min) {
+            status = +this.indicatorNum >= +item.min;
+          }
+          if (item.max) {
+            status = status === void 0 ? true : status;
+            status = status && +this.indicatorNum <= +item.max;
+          }
+          return status;
+        });
+        if (matchStyle) {
+          color = matchStyle.color;
+        }
+      }
+      let style = { color };
       typeof this.indicatorNum === 'string' && (style.fontSize = parseFloat(this.fontSize) + this.fontUnit);
       return style;
     },
@@ -253,7 +279,8 @@ export default {
       this.getRestService().getData(this.url);
     },
     changeNumData(newData) {
-      this.startData = this.animated ? +this.numData : +newData;
+      const startData = this.animated ? +this.numData : +newData;
+      this.startData = isNaN(startData) ? 0 : startData;
       this.numData = +newData;
       this.indicatorNum = newData;
     },

@@ -15,16 +15,20 @@ export default class AnimateMarkerLayerViewModel extends mapboxgl.Evented {
 
   fitBounds: Boolean;
 
-  constructor(map: mapboxglTypes.Map, features: FeatureCollection, markersElement: HTMLElement[], fitBounds: Boolean = true) {
+  constructor(features: FeatureCollection, markersElement: HTMLElement[], fitBounds: Boolean = true) {
     super();
-    if (!map) {
-      throw new Error('map is requierd');
-    }
-    this.map = map;
     this.features = features;
     this.markers = [];
     this.markersElement = markersElement;
     this.fitBounds = fitBounds;
+  }
+
+  public setMap(mapInfo) {
+    const { map } = mapInfo;
+    if (!map) {
+      throw new Error('map is requierd');
+    }
+    this.map = map;
     this.features && this._initalizeMarkerLayer();
   }
 
@@ -43,11 +47,17 @@ export default class AnimateMarkerLayerViewModel extends mapboxgl.Evented {
     if (!this.features || JSON.stringify(this.features) === '{}') {
       return;
     }
-    this.clear();
+    this.removed();
     this._createMarker();
   }
   private _createMarker() {
-    if (this.markersElement.length === 0) {
+    if (
+      this.markersElement.length === 0 ||
+      !this.map ||
+      !this.features ||
+      !this.features.features ||
+      this.features.features.length === 0
+    ) {
       return;
     }
     this.features.features.forEach((point, index) => {
@@ -63,11 +73,18 @@ export default class AnimateMarkerLayerViewModel extends mapboxgl.Evented {
     if (this.fitBounds) {
       // @ts-ignore
       const bounds = bbox(transformScale(envelope(this.features), 1.7));
-      this.fitBounds && this.map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], { maxZoom: 17 });
+      this.fitBounds &&
+        this.map.fitBounds(
+          [
+            [bounds[0], bounds[1]],
+            [bounds[2], bounds[3]]
+          ],
+          { maxZoom: 17 }
+        );
     }
   }
 
-  public clear() {
+  public removed() {
     this.markers.length > 0 &&
       this.markers.forEach(marker => {
         marker && marker.remove();

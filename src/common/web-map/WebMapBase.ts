@@ -8,13 +8,16 @@ import canvg from 'canvg';
 
 import WebMapService from '../_utils/WebMapService';
 import { getColorWithOpacity } from '../_utils/util';
+import { getProjection, registerProjection } from '../../common/_utils/epsg-define';
 
 // 迁徙图最大支持要素数量
 const MAX_MIGRATION_ANIMATION_COUNT = 1000;
 export default abstract class WebMapBase extends Events {
   map: any;
 
-  mapId: string;
+  mapId: string | number | object;
+
+  webMapInfo: any;
 
   mapOptions: any;
 
@@ -28,6 +31,8 @@ export default abstract class WebMapBase extends Events {
 
   withCredentials: boolean;
 
+  proxy: String | Boolean;
+
   target: string;
 
   excludePortalProxyUrl: boolean;
@@ -39,6 +44,8 @@ export default abstract class WebMapBase extends Events {
   mapParams: { title?: string; description?: string };
 
   baseProjection: string;
+
+  ignoreBaseProjection: boolean;
 
   on: any;
 
@@ -58,15 +65,16 @@ export default abstract class WebMapBase extends Events {
 
   constructor(id, options?, mapOptions?) {
     super();
-    this.mapId = id;
     this.serverUrl = options.serverUrl || 'https://www.supermapol.com';
     this.accessToken = options.accessToken;
     this.accessKey = options.accessKey;
     this.tiandituKey = options.tiandituKey || '';
     this.withCredentials = options.withCredentials || false;
+    this.proxy = options.proxy;
     this.target = options.target || 'map';
     this.excludePortalProxyUrl = options.excludePortalProxyUrl;
     this.isSuperMapOnline = options.isSuperMapOnline;
+    this.ignoreBaseProjection = options.ignoreBaseProjection;
     this.echartslayer = [];
     this.webMapService = new WebMapService(id, options);
     this.mapOptions = mapOptions;
@@ -77,8 +85,10 @@ export default abstract class WebMapBase extends Events {
       'addlayerssucceeded',
       'notsupportmvt',
       'notsupportbaidumap',
-      'projectionIsNotMatch'
+      'projectionIsNotMatch',
+      'beforeremovemap'
     ];
+    this.mapId = id;
   }
 
   abstract _initWebMap(): void;
@@ -98,7 +108,7 @@ export default abstract class WebMapBase extends Events {
     });
   }
 
-  public setMapId(mapId: string): void {
+  public setMapId(mapId: string | number): void {
     this.mapId = mapId;
     this.webMapService.setMapId(mapId);
     setTimeout(() => {
@@ -116,10 +126,17 @@ export default abstract class WebMapBase extends Events {
     this.webMapService.setWithCredentials(withCredentials);
   }
 
+  public setProxy(proxy) {
+    this.proxy = proxy;
+    this.webMapService.setProxy(proxy);
+  }
+
   public setZoom(zoom) {
     if (this.map) {
       this.mapOptions.zoom = zoom;
-      (zoom || zoom === 0) && this.map.setZoom(zoom);
+      if (zoom !== +this.map.getZoom().toFixed(2)) {
+        (zoom || zoom === 0) && this.map.setZoom(zoom, { from: 'setZoom' });
+      }
     }
   }
 
@@ -146,7 +163,17 @@ export default abstract class WebMapBase extends Events {
 
   protected initWebMap() {
     this.cleanWebMap();
-    if (!this.mapId || !this.serverUrl) {
+    if (this.webMapInfo) {
+      // 传入是webmap对象
+      let mapInfo = this.webMapInfo;
+      mapInfo.mapParams = {
+        title: this.webMapInfo.title,
+        description: this.webMapInfo.description
+      };
+      this.mapParams = mapInfo.mapParams;
+      this._getMapInfo(mapInfo, null);
+      return;
+    } else if (!this.mapId || !this.serverUrl) {
       this._createMap();
       return;
     }
@@ -155,26 +182,26 @@ export default abstract class WebMapBase extends Events {
   }
 
   protected getMapInfo(_taskID) {
-      this.serverUrl = this.webMapService.handleServerUrl(this.serverUrl);
-      this.webMapService
-        .getMapInfo()
-        .then(
-          (mapInfo: any) => {
-            if (this._taskID !== _taskID) {
-              return;
-            }
-            // 存储地图的名称以及描述等信息，返回给用户
-            this.mapParams = mapInfo.mapParams;
-            this._getMapInfo(mapInfo, _taskID);
-          },
-          error => {
-            throw error;
+    this.serverUrl = this.webMapService.handleServerUrl(this.serverUrl);
+    this.webMapService
+      .getMapInfo()
+      .then(
+        (mapInfo: any) => {
+          if (this._taskID !== _taskID) {
+            return;
           }
-        )
-        .catch(error => {
-          this.triggerEvent('getmapinfofailed', { error });
-          console.log(error);
-        });
+          // 存储地图的名称以及描述等信息，返回给用户
+          this.mapParams = mapInfo.mapParams;
+          this._getMapInfo(mapInfo, _taskID);
+        },
+        error => {
+          throw error;
+        }
+      )
+      .catch(error => {
+        this.triggerEvent('getmapinfofailed', { error });
+        console.log(error);
+      });
   }
 
   protected getBaseLayerType(layerInfo) {
@@ -210,8 +237,8 @@ export default abstract class WebMapBase extends Events {
 
   protected getMapurls(mapurl: { CLOUD?: string; CLOUD_BLACK?: string; OSM?: string } = {}) {
     let mapUrls = {
-      CLOUD: mapurl.CLOUD || 'http://t2.supermapcloud.com/FileService/image?map=quanguo&type=web&x={x}&y={y}&z={z}',
-      CLOUD_BLACK: mapurl.CLOUD_BLACK || 'http://t3.supermapcloud.com/MapService/getGdp?x={x}&y={y}&z={z}',
+      CLOUD: mapurl.CLOUD || 'http://t2.dituhui.com/FileService/image?map=quanguo&type=web&x={x}&y={y}&z={z}',
+      CLOUD_BLACK: mapurl.CLOUD_BLACK || 'http://t3.dituhui.com/MapService/getGdp?x={x}&y={y}&z={z}',
       OSM: mapurl.OSM || 'https://{a-c}.tile.openstreetmap.org/{z}/{x}/{y}.png',
       GOOGLE:
         'https://www.google.cn/maps/vt/pb=!1m4!1m3!1i{z}!2i{x}!3i{y}!2m3!1e0!2sm!3i380072576!3m8!2szh-CN!3scn!5e1105!12m4!1e68!2m2!1sset!2sRoadmap!4e0!5m1!1e0',
@@ -231,10 +258,22 @@ export default abstract class WebMapBase extends Events {
     getLayerFunc &&
       getLayerFunc
         .then(
-          result => {
-            if (this._taskID !== _taskID) {
+          async result => {
+            if (this.mapId && this._taskID !== _taskID) {
               return;
             }
+            if (result && layer.projection) {
+              if (!getProjection(layer.projection)) {
+                const epsgWKT = await this.webMapService.getEpsgCodeInfo(
+                  layer.projection.split(':')[1],
+                  this.serverUrl
+                );
+                if (epsgWKT) {
+                  registerProjection(layer.projection, epsgWKT);
+                }
+              }
+            }
+
             this._getLayerFeaturesSucceeded(result, layer);
           },
           error => {
@@ -278,7 +317,9 @@ export default abstract class WebMapBase extends Events {
       segmentCount = themeSetting.segmentCount,
       customSettings = themeSetting.customSettings,
       minR = parameters.themeSetting.minRadius,
-      maxR = parameters.themeSetting.maxRadius;
+      maxR = parameters.themeSetting.maxRadius,
+      colors = themeSetting.colors,
+      fillColor = style.fillColor;
     features.forEach(feature => {
       let properties = feature.properties,
         value = properties[themeField];
@@ -311,8 +352,11 @@ export default abstract class WebMapBase extends Events {
         incrementR = (maxR - minR) / (len - 1), // 半径增量
         start,
         end,
-        radius = Number(((maxR + minR) / 2).toFixed(2));
+        radius = Number(((maxR + minR) / 2).toFixed(2)),
+        color = '';
+      let rangeColors = colors ? SuperMap.ColorsPickerUtil.getGradientColors(colors, len, 'RANGE') : [];
       for (let i = 0; i < len - 1; i++) {
+        // 处理radius
         start = Number(segements[i].toFixed(2));
         end = Number(segements[i + 1].toFixed(2));
         // 这里特殊处理以下分段值相同的情况（即所有字段值相同）
@@ -322,7 +366,12 @@ export default abstract class WebMapBase extends Events {
         // 处理自定义 半径
         radius = customSettings[i] && customSettings[i].radius ? customSettings[i].radius : radius;
         style.radius = radius;
-        styleGroup.push({ radius, start, end, style });
+        // 处理颜色
+        if (colors && colors.length > 0) {
+          color = customSettings[i] && customSettings[i].color ? customSettings[i].color : rangeColors[i] || fillColor;
+          style.fillColor = color;
+        }
+        styleGroup.push({ radius, color, start, end, style });
       }
       return styleGroup;
     } else {
@@ -367,14 +416,53 @@ export default abstract class WebMapBase extends Events {
     if ((style || themeSetting) && filterCondition) {
       // 将 feature 根据过滤条件进行过滤, 分段专题图和单值专题图因为要计算 styleGroup 所以暂时不过滤
       if (layerType !== 'RANGE' && layerType !== 'UNIQUE' && layerType !== 'RANK_SYMBOL') {
-        features = this.getFiterFeatures(filterCondition, features);
+        features = this.getFilterFeatures(filterCondition, features);
       }
     }
 
     return features;
   }
 
-  protected getFiterFeatures(filterCondition: string, allFeatures): any {
+  protected mergeFeatures(layerId: string, features: any, mergeByField?: string): any {
+    features = features.map((feature: any, index: any) => {
+      if (!feature.properties.hasOwnProperty('index')) {
+        feature.properties.index = index;
+      }
+      return feature;
+    });
+    if (!mergeByField) {
+      return features;
+    }
+    const source = this.map.getSource(layerId);
+    if (!source || !source._data.features) {
+      return features;
+    }
+    const prevFeatures = source._data.features;
+    const nextFeatures = [];
+    features.forEach((feature: any) => {
+      const prevFeature = prevFeatures.find((item: any) => {
+        if (isNaN(+item.properties[mergeByField]) && isNaN(+feature.properties[mergeByField])) {
+          return (
+            JSON.stringify(item.properties[mergeByField] || '') ===
+            JSON.stringify(feature.properties[mergeByField] || '')
+          );
+        } else {
+          return +item.properties[mergeByField] === +feature.properties[mergeByField];
+        }
+      });
+      if (prevFeature) {
+        nextFeatures.push({
+          ...prevFeature,
+          ...feature
+        });
+      } else if (feature.geometry) {
+        nextFeatures.push(feature);
+      }
+    });
+    return nextFeatures;
+  }
+
+  protected getFilterFeatures(filterCondition: string, allFeatures): any {
     if (!filterCondition) {
       return allFeatures;
     }
@@ -435,6 +523,9 @@ export default abstract class WebMapBase extends Events {
       case 'dash':
         dashArr = [4 * w, 4 * w];
         break;
+      case 'dashrailway':
+        dashArr = [8 * w, 12 * w];
+        break;
       case 'dashdot':
         dashArr = [4 * w, 4 * w, 1 * w, 4 * w];
         break;
@@ -458,7 +549,7 @@ export default abstract class WebMapBase extends Events {
 
   protected getCanvasFromSVG(svgUrl: string, divDom: HTMLElement, callBack: Function): void {
     let canvas = document.createElement('canvas');
-    canvas.id = `dataviz-canvas-${new Date()}`;
+    canvas.id = `dataviz-canvas-${new Date().getTime()}`;
     canvas.style.display = 'none';
     divDom.appendChild(canvas);
     let canvgs = window.canvg ? window.canvg : canvg;
@@ -511,7 +602,7 @@ export default abstract class WebMapBase extends Events {
 
       // 获取一定量的颜色
       let curentColors = colors;
-
+      curentColors = SuperMap.ColorsPickerUtil.getGradientColors(curentColors, itemNum, 'RANGE');
       for (let index = 0; index < itemNum; index++) {
         if (index in customSettings) {
           if (customSettings[index]['segment']['start']) {
@@ -582,49 +673,40 @@ export default abstract class WebMapBase extends Events {
     let styleGroup = [];
     names.forEach((name, index) => {
       let color = curentColors[index];
+      let itemStyle = { ...style };
       if (name in customSettings) {
-        color = customSettings[name];
+        const customStyle = customSettings[name];
+        if (typeof customStyle === 'object') {
+          itemStyle = Object.assign(itemStyle, customStyle);
+        } else {
+          if (typeof customStyle === 'string') {
+            color = customSettings[name];
+          }
+          if (featureType === 'LINE') {
+            itemStyle.strokeColor = color;
+          } else {
+            itemStyle.fillColor = color;
+          }
+        }
       }
-      if (featureType === 'LINE') {
-        style.strokeColor = color;
-      } else {
-        style.fillColor = color;
-      }
+
       styleGroup.push({
         color: color,
-        style: { ...style },
-        value: name
+        style: itemStyle,
+        value: name,
+        themeField: themeField
       });
     }, this);
 
     return styleGroup;
   }
 
-  protected getEpsgInfoFromWKT(wkt) {
-    if (typeof wkt !== 'string') {
-      return '';
-    } else if (wkt.indexOf('EPSG') === 0) {
-      return wkt;
-    } else {
-      let lastAuthority = wkt.lastIndexOf('AUTHORITY') + 10,
-        endString = wkt.indexOf(']', lastAuthority) - 1;
-      if (lastAuthority > 0 && endString > 0) {
-        return `EPSG:${wkt
-          .substring(lastAuthority, endString)
-          .split(',')[1]
-          .substr(1)}`;
-      } else {
-        return '';
-      }
-    }
-  }
-
   protected transformFeatures(features) {
     features &&
       features.forEach((feature, index) => {
-        let geometryType = feature.geometry.type;
-        let coordinates = feature.geometry.coordinates;
-        if (coordinates.length === 0) {
+        let geometryType = feature.geometry && feature.geometry.type;
+        let coordinates = feature.geometry && feature.geometry.coordinates;
+        if (!coordinates || coordinates.length === 0) {
           return;
         }
         if (geometryType === 'LineString') {

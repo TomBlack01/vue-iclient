@@ -25,7 +25,7 @@ let origin = argv.original;
 let entry = './demo/mapboxgl/main.ts';
 
 if (origin[2] && ['-mapboxgl', '-leaflet'].includes(origin[2])) {
-  let type = origin[2].split('-')[1];
+  let type = origin[2].replace("-", "");
   entry = `./demo/${type}/main.ts`;
 }
 
@@ -79,7 +79,11 @@ module.exports = {
           // resolve('node_modules/webpack-dev-server/client'),
           resolve('node_modules/vue-echarts'),
           resolve('node_modules/resize-detector'),
-          resolve('node_modules/colorcolor')
+          resolve('node_modules/colorcolor'),
+          resolve('node_modules/three/examples/jsm/loaders'),
+          resolve('node_modules/vue-videojs7'),
+          resolve('node_modules/flv.js/src'),
+          resolve('node_modules/videojs-flvjs-es6/src'),
         ]
       },
       {

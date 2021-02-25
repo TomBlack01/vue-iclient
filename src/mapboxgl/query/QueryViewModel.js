@@ -6,6 +6,9 @@ import { geti18n } from '../../common/_lang';
 import '../../../static/libs/iclient-mapboxgl/iclient-mapboxgl.min';
 import { getFeatureCenter, getValueCaseInsensitive } from '../../common/_utils/util';
 import { checkAndRectifyFeatures } from '../../common/_utils/iServerRestService';
+import bbox from '@turf/bbox';
+import envelope from '@turf/envelope';
+import transformScale from '@turf/transform-scale';
 
 /**
  * @class QueryViewModel
@@ -25,15 +28,15 @@ import { checkAndRectifyFeatures } from '../../common/_utils/iServerRestService'
  * @fires QueryViewModel#getfeatureinfosucceeded
  */
 export default class QueryViewModel extends mapboxgl.Evented {
-  constructor(options, map) {
+  constructor(options) {
     super();
-    this.map = map;
     this.options = options || {};
     this.maxFeatures = this.options.maxFeatures || 200;
     this.layerStyle = options.layerStyle || {};
   }
 
-  setMap(map) {
+  setMap(mapInfo) {
+    const { map } = mapInfo;
     this.map = map;
   }
 
@@ -44,7 +47,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
     }
   }
 
-  clear() {
+  removed() {
     this.bounds = null;
     this.clearResultLayer();
   }
@@ -59,7 +62,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
       return;
     }
     this.queryParameter = queryParameter;
-    this.clear();
+    this.removed();
     this.queryBounds = queryBounds;
     if (queryBounds === 'currentMapBounds') {
       this.bounds = this.map.getBounds();
@@ -84,7 +87,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
   }
 
   _queryByRestMap(restMapParameter) {
-    const options = {};
+    const options = { withCredentials: restMapParameter.withCredentials || false };
     if (restMapParameter.proxy) {
       options.proxy = restMapParameter.proxy;
     }
@@ -119,7 +122,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
   _queryByRestData(restDataParameter) {
     let maxFeatures = restDataParameter.maxFeatures || this.maxFeatures;
     let toIndex = maxFeatures === 1 ? 0 : maxFeatures - 1;
-    const options = {};
+    const options = { withCredentials: restDataParameter.withCredentials || false };
     if (restDataParameter.proxy) {
       options.proxy = restDataParameter.proxy;
     }
@@ -157,7 +160,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
     if (result && result.totalCount !== 0) {
       let resultFeatures = result.recordsets[0].features.features;
       const projectionUrl = `${restMapParameter.url}/prjCoordSys`;
-      resultFeatures = await checkAndRectifyFeatures({ features: resultFeatures, projectionUrl, options }).catch(
+      resultFeatures = await checkAndRectifyFeatures({ features: resultFeatures, epsgCode: restMapParameter.epsgCode, projectionUrl, options }).catch(
         error => {
           console.error(error);
           return resultFeatures;
@@ -186,12 +189,12 @@ export default class QueryViewModel extends mapboxgl.Evented {
   async _dataQuerySucceed(serviceResult, restDataParameter, options) {
     let result = serviceResult.result;
     if (result && result.totalCount !== 0) {
-      const { url, dataName } = restDataParameter;
+      const { url, dataName, epsgCode } = restDataParameter;
       const dataSourceName = dataName[0].split(':')[0];
       const datasetName = dataName[0].split(':')[1];
       const projectionUrl = `${url}/datasources/${dataSourceName}/datasets/${datasetName}`;
       let resultFeatures = result.features.features;
-      resultFeatures = await checkAndRectifyFeatures({ features: resultFeatures, projectionUrl, options }).catch(
+      resultFeatures = await checkAndRectifyFeatures({ features: resultFeatures, epsgCode, projectionUrl, options }).catch(
         error => {
           console.error(error);
           return resultFeatures;
@@ -223,14 +226,10 @@ export default class QueryViewModel extends mapboxgl.Evented {
         // 是否有rest服务
         if (data.dataItemServices && data.dataItemServices.length > 0) {
           let dataItemServices = data.dataItemServices;
-          let resultData;
-          dataItemServices.forEach(item => {
-            if (item.serviceType === 'RESTDATA' && item.serviceStatus === 'PUBLISHED') {
-              resultData = item;
-            } else if (item.serviceType === 'RESTMAP' && item.serviceStatus === 'PUBLISHED') {
-              resultData = item;
-            }
-          }, this);
+          let resultData = dataItemServices.find(
+            item =>
+              (item.serviceType === 'RESTDATA' || item.serviceType === 'RESTMAP') && item.serviceStatus === 'PUBLISHED'
+          );
           if (resultData) {
             // 如果有服务，获取数据源和数据集, 然后请求rest服务
             this._getDatafromRest(resultData.serviceType, resultData.address, iportalDataParameter);
@@ -252,7 +251,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
       let url = `${address}/data/datasources`;
 
       let sourceName, datasetName; // 请求获取数据源名
-      SuperMap.FetchRequest.get(url, null, { withCredentials: false })
+      SuperMap.FetchRequest.get(url, null, { withCredentials: iportalDataParameter.withCredentials })
         .then(response => {
           return response.json();
         })
@@ -260,7 +259,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
           sourceName = data.datasourceNames[0];
           url = `${address}/data/datasources/${sourceName}/datasets`;
           // 请求获取数据集名
-          SuperMap.FetchRequest.get(url, null, { withCredentials: false })
+          SuperMap.FetchRequest.get(url, null, { withCredentials: iportalDataParameter.withCredentials })
             .then(response => {
               return response.json();
             })
@@ -272,7 +271,9 @@ export default class QueryViewModel extends mapboxgl.Evented {
                 url: `${address}/data`,
                 name: iportalDataParameter.name,
                 attributeFilter: iportalDataParameter.attributeFilter,
-                maxFeatures: iportalDataParameter.maxFeatures
+                maxFeatures: iportalDataParameter.maxFeatures,
+                epsgCode: iportalDataParameter.epsgCode,
+                withCredentials: iportalDataParameter.withCredentials
               });
             })
             .catch(error => {
@@ -288,7 +289,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
       // 如果是地图服务
       let url = `${address}/maps`;
       let mapName, layerName, path; // 请求获取地图名
-      SuperMap.FetchRequest.get(url, null, { withCredentials: false })
+      SuperMap.FetchRequest.get(url, null, { withCredentials: iportalDataParameter.withCredentials })
         .then(response => {
           return response.json();
         })
@@ -297,7 +298,7 @@ export default class QueryViewModel extends mapboxgl.Evented {
           path = data[0].path;
           url = url = `${address}/maps/${mapName}/layers`;
           // 请求获取图层名
-          SuperMap.FetchRequest.get(url, null, { withCredentials: false })
+          SuperMap.FetchRequest.get(url, null, { withCredentials: iportalDataParameter.withCredentials })
             .then(response => {
               return response.json();
             })
@@ -309,7 +310,9 @@ export default class QueryViewModel extends mapboxgl.Evented {
                 url: path,
                 name: iportalDataParameter.name,
                 attributeFilter: iportalDataParameter.attributeFilter,
-                maxFeatures: iportalDataParameter.maxFeatures
+                maxFeatures: iportalDataParameter.maxFeatures,
+                epsgCode: iportalDataParameter.epsgCode,
+                withCredentials: iportalDataParameter.withCredentials
               });
               return layerName;
             })
@@ -336,6 +339,15 @@ export default class QueryViewModel extends mapboxgl.Evented {
       }
     };
     this._addOverlayToMap(type, source, this.layerID);
+    const bounds = bbox(transformScale(envelope(source.data), 1.7));
+    this.map.fitBounds(
+      [
+        [bounds[0], bounds[1]],
+        [bounds[2], bounds[3]]
+      ],
+      { maxZoom: 17 }
+    );
+    this.getPopupFeature();
   }
 
   /**
@@ -405,9 +417,12 @@ export default class QueryViewModel extends mapboxgl.Evented {
    */
   addPopup(coordinates, popupContainer) {
     popupContainer.style.display = 'block';
+    this.map.flyTo({ center: coordinates });
     return new mapboxgl.Popup({
       className: 'sm-mapboxgl-tabel-popup',
       closeOnClick: true,
+      closeButton: false,
+      maxWidth: 'none',
       anchor: 'bottom'
     })
       .setLngLat(coordinates)

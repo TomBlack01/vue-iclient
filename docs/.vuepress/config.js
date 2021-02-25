@@ -94,13 +94,14 @@ module.exports = {
         label: '简体中文',
         selectText: '选择语言',
         nav: [
-          // {
-          //   text: '指南',
-          //   link: '/zh/guide/'
-          // },
           {
             text: '组件',
             link: '/zh/api/'
+          },
+          {
+            text: 'Storybook',
+            link: '../../../../../storybook/vue/index.html',
+            target:'_blank'
           }
         ],
         sidebar: {
@@ -116,6 +117,7 @@ module.exports = {
               children: [
                 'web-map/map',
                 'web-scene/scene',
+                'map-compare/compare',
                 {
                   title: '地图子组件',
                   collapsable: false,
@@ -159,7 +161,8 @@ module.exports = {
                     'layer/mapv',
                     'layer/echarts',
                     'layer/deckgl',
-                    'layer/dataflow'
+                    'layer/dataflow',
+                    'layer/track'
                   ]
                 },
                 {
@@ -178,7 +181,8 @@ module.exports = {
                     'common/image',
                     'common/iframe',
                     'common/text-list',
-                    'common/border'
+                    'common/border',
+                    'common/video-player'
                   ]
                 }
               ]

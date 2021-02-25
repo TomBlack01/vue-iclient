@@ -18,21 +18,25 @@ import transformScale from '@turf/transform-scale';
 import { geti18n } from '../../../common/_lang';
 
 export default class TdtSearchViewModel extends mapboxgl.Evented {
-  constructor(map, options) {
+  constructor(options) {
     super();
     this.options = options || {};
-    if (map) {
-      this.map = map;
-    } else {
-      return new Error(`Cannot find map`);
-    }
     this.groupLineList = {};
     this.data = options.data;
     this.searchResultPoints = sourceNames.searchResultPoints;
     this.searchResultLine = sourceNames.searchResultLine;
     this.searchResultPolygon = sourceNames.searchResultPolygon;
     this.searchResultPointsOfLine = sourceNames.searchResultPointsOfLine;
-    this.registerEvents();
+  }
+
+  setMap(mapInfo) {
+    const { map } = mapInfo;
+    if (map) {
+      this.map = map;
+      this.registerEvents();
+    } else {
+      return new Error(`Cannot find map`);
+    }
   }
 
   registerEvents() {
@@ -346,19 +350,19 @@ export default class TdtSearchViewModel extends mapboxgl.Evented {
     return feature;
   }
 
-  showLineDetail(uuid) {
+  showLineDetail(uuid, addLine = true) {
     if (!uuid) return;
 
     if (!this.groupLineList[uuid]) {
       this._transitByUuid(uuid).then(res => {
         if (res) {
           this.groupLineList[uuid] = res;
-          this._addLines(this._generateLinesFeatures(res));
+          addLine && this._addLines(this._generateLinesFeatures(res));
           this.fire('get-transit-data-succeeded', { data: this.groupLineList });
         }
       });
     } else {
-      this._addLines(this._generateLinesFeatures(this.groupLineList[uuid]));
+      addLine && this._addLines(this._generateLinesFeatures(this.groupLineList[uuid]));
     }
   }
 
@@ -515,7 +519,8 @@ export default class TdtSearchViewModel extends mapboxgl.Evented {
     clearSearchResultLayer(this.map);
   }
 
-  clear() {
+  removed() {
+    this.groupLineList = {};
     if (!this.options.resultRender) {
       this._removeResultPopup();
       this._clearSearchResultLayer();

@@ -28,7 +28,9 @@ export default {
     unsupportedVideoAddress: 'The video address is illegal',
     unavailableVideo: 'This video is temporarily unavailable, please try again later',
     mapNotLoaded: 'The associated map has not been loaded yet, please wait for a second',
-    unassociatedMap: 'You need to configure the associated map!'
+    unassociatedMap: 'You need to configure the associated map!',
+    videojs: 'Please import video.js plugin: https://github.com/videojs/video.js, When playing rtmp, install flash related plugin: https://github.com/videojs/videojs-flash',
+    flvPlayer: 'Please import flv related plugin: https://github.com/bilibili/flv.js, https://github.com/mister-ben/videojs-flvjs'
   },
   success: {},
   info: {
@@ -79,6 +81,7 @@ export default {
     crsNotSupport: 'The coordinate system of the current map is not supported!',
     TileMatrixSetNotSuppport: 'Incoming TileMatrixSet is not supported!',
     getLayerInfoFailed: 'Failed to get layer information!',
+    getThemeInfoFailed: 'Failed to get theme information!',
     crsnotsupport: 'Unsupported coordinate system!',
     baiduMapNotSupport: 'Baidu maps is not supported yet!',
     sampleDataNotSupport: 'Sample datas is not supported yet!',
@@ -93,7 +96,7 @@ export default {
   },
   measure: {
     mapMeasure: 'Measure',
-    measureResult: 'Measurement Result',
+    measureResult: 'Measurement Result:',
     distance: 'Distance',
     area: 'Area',
     delete: 'Empty',
@@ -130,7 +133,8 @@ export default {
     seviceNotSupport: 'This service does not support queries!'
   },
   identify: {
-    layerNotExit: "The layer '{layer}' does not exist in the map's style"
+    layerNotExit: "The layer '{layer}' does not exist in the map's style",
+    noData: 'no Data'
   },
   openFile: {
     fileSizeExceeded: "The file size is too big! The file size can't exceed 10M!",
@@ -207,7 +211,6 @@ export default {
   },
   tdtRoute: {
     title: 'Route',
-    clearRoute: 'Clear route',
     pleaseEnterStartPoint: 'Please enter the starting address',
     pleaseEnterEndPoint: 'Please enter the destination address',
     search: 'Search',

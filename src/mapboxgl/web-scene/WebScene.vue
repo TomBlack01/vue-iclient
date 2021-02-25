@@ -1,13 +1,17 @@
 <template>
   <div class="sm-component-web-scene">
-    <cesium-viewer v-if="sceneUrl" class="sm-component-web-scene__wrap" @ready="ready"></cesium-viewer>
+    <vc-viewer
+      v-if="sceneUrl"
+      class="sm-component-web-scene__wrap"
+      :cesiumPath="cesiumPath"
+      @ready="ready"
+    ></vc-viewer>
   </div>
 </template>
 <script lang="ts">
 import Vue from 'vue';
 import { Component, Prop, Watch, Emit } from 'vue-property-decorator';
 import WebSceneViewModel from './WebSceneViewModel';
-import isEqual from 'lodash.isequal';
 
 @Component({
   name: 'SmWebScene'
@@ -16,6 +20,8 @@ class SmWebScene extends Vue {
   WebSceneViewModel: WebSceneViewModel;
 
   @Prop() sceneUrl: string;
+
+  @Prop() cesiumPath: string;
 
   @Prop() options: {
     withCredentials: boolean;
@@ -36,16 +42,12 @@ class SmWebScene extends Vue {
 
   @Watch('options.scanEffect')
   scanEffectChaned(newVal, oldVal) {
-    if (!isEqual(newVal, oldVal)) {
-      this.WebSceneViewModel && this.WebSceneViewModel.setScanEffect(this.options.scanEffect);
-    }
+    this.WebSceneViewModel && this.WebSceneViewModel.setScanEffect(this.options.scanEffect);
   }
 
   @Watch('options.position')
   positionChaned(newVal, oldVal) {
-    if (!isEqual(newVal, oldVal)) {
-      this.WebSceneViewModel && this.WebSceneViewModel.setPosition(this.options.position);
-    }
+    this.WebSceneViewModel && this.WebSceneViewModel.setPosition(this.options.position);
   }
 
   @Emit()

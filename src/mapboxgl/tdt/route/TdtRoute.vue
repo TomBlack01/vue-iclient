@@ -1,5 +1,5 @@
 <template>
-  <sm-card
+  <sm-collapse-card
     v-show="isShow"
     :icon-class="iconClass"
     :icon-position="position"
@@ -8,91 +8,72 @@
     :collapsed="collapsed"
     :background="background"
     :textColor="textColor"
+    :split-line="splitLine"
     class="sm-component-tdtRoute"
   >
-    <div class="sm-component-tdtRoute__panel" :style="[getBackgroundStyle, getTextColorStyle]">
+    <div class="sm-component-tdtRoute__panel" :style="getTextColorStyle">
       <div class="sm-component-tdtRoute__header">
         <div class="route-navbar">
-          <div>
-            <div
-              :class="['car-icon', { 'active': routeActive === 'car' }]"
-              @click="routeActive = 'car'"
-            >
-              <i></i>
+          <div class="route-tabs">
+            <div :class="['car-icon', { active: routeActive === 'car' }]" @click="routeActive = 'car'">
+              <i class="sm-components-icon-car" />
             </div>
-            <div
-              :class="['bus-icon', { 'active': routeActive === 'bus' }]"
-              @click="routeActive = 'bus'"
-            >
-              <i></i>
+            <div :class="['bus-icon', { active: routeActive === 'bus' }]" @click="routeActive = 'bus'">
+              <i class="sm-components-icon-bus" />
             </div>
           </div>
-          <div
-            class="clear-route"
-            :style="[getTextColorStyle]"
-            @click="clearRoute"
-          >{{ $t('tdtRoute.clearRoute') }}</div>
+          <div class="clear-route" :style="secondaryTextColorStyle" @click="clearRoute">
+            <i class="sm-components-icon-close" />
+          </div>
         </div>
         <div class="route-panel">
           <div class="start-route">
             <div class="icon-wrapper">
-              <div class="icon"></div>
+              <div class="icon" />
             </div>
             <div class="content">
-              <a-input
+              <sm-input
                 v-model="start"
+                allowClear
                 :placeholder="$t('tdtRoute.pleaseEnterStartPoint')"
                 :title="$t('tdtRoute.pleaseEnterStartPoint')"
-                :style="[getBackgroundStyle, getTextColorStyle]"
+                :style="[headingTextColorStyle, getBackgroundStyle]"
                 @keyup.13="searchClicked"
-              >
-                <a-icon
-                  slot="suffix"
-                  type="close-circle"
-                  :style="[getTextColorStyle]"
-                  @click="clearStart"
-                />
-              </a-input>
+                @change="e => !e.target.value && clearStart()"
+              />
             </div>
           </div>
           <div class="end-route">
             <div class="icon-wrapper">
-              <div class="icon"></div>
+              <div class="icon" />
             </div>
             <div class="content">
-              <a-input
+              <sm-input
                 v-model="end"
+                allowClear
                 :placeholder="$t('tdtRoute.pleaseEnterEndPoint')"
                 :title="$t('tdtRoute.pleaseEnterEndPoint')"
-                :style="[getBackgroundStyle, getTextColorStyle]"
+                :style="[headingTextColorStyle, getBackgroundStyle]"
                 @keyup.13="searchClicked"
-              >
-                <a-icon
-                  slot="suffix"
-                  type="close-circle"
-                  :style="[getTextColorStyle]"
-                  @click="clearEnd"
-                />
-              </a-input>
+                @change="e => !e.target.value && clearEnd()"
+              />
             </div>
           </div>
           <div class="switch-route" @click="switchRoute">
-            <a-icon type="swap" />
+            <i class="sm-components-icon-change" />
+          </div>
+          <div class="search-btn">
+            <sm-button type="primary" @click="searchClicked">
+              {{ $t('tdtRoute.search') }}
+            </sm-button>
           </div>
         </div>
-        <div class="search-btn">
-          <a-button
-            type="primary"
-            :style="[getBackgroundStyle, getTextColorStyle]"
-            @click="searchClicked"
-          >{{ $t('tdtRoute.search') }}</a-button>
-        </div>
       </div>
-      <div class="sm-component-tdtRoute__content" :style="[getBackgroundStyle, getTextColorStyle]">
+      <div class="sm-component-tdtRoute__content">
         <div v-if="!showRoutePlan && status" class="route-result">
           <div class="start-point">
             <div class="title">
-              <a-icon type="question-circle" theme="filled" />
+              <i class="sm-components-icon-solid-question" />
               <span @click="resetStatus('toSetStart')">{{ $t('tdtRoute.startPoint') }}：{{ start }}</span>
             </div>
             <div v-if="status === 'toSetStart' && componentId" class="content">
@@ -101,43 +82,49 @@
           </div>
           <div class="end-point">
             <div class="title">
-              <a-icon type="question-circle" theme="filled" />
+              <i class="sm-components-icon-solid-question" />
               <span @click="resetStatus('toSetEnd')">{{ $t('tdtRoute.endPoint') }}：{{ end }}</span>
             </div>
             <div v-if="status === 'toSetEnd' && componentId" class="content">
-              <component :is="componentId" v-bind="componentProps" v-on="componentListeners"></component>
+              <component
+                :is="componentId"
+                v-bind="componentProps"
+                :text-color="textColor"
+                v-on="componentListeners"
+              ></component>
             </div>
           </div>
         </div>
         <RoutePlan
           v-if="showRoutePlan"
           :route-plan="routePlan"
-          :start="{name: start}"
-          :dest="{name: end}"
+          :start="{ name: start }"
+          :dest="{ name: end }"
           :spinning="spinning"
           :search-type="routeActive"
           :isError="isError"
-          :themeStyle="[getBackgroundStyle, getTextColorStyle]"
+          :text-color="textColor"
           @style-changed="styleChanged"
           @route-plan-clicked="routePlanClicked"
           @bus-info-clicked="busInfoClicked"
         />
       </div>
     </div>
-  </sm-card>
+  </sm-collapse-card>
 </template>
 
 <script>
-import Theme from '../../../common/_mixin/theme';
+import Theme from '../../../common/_mixin/Theme';
 import Control from '../../_mixin/control';
 import MapGetter from '../../_mixin/map-getter';
-import Card from '../../../common/_mixin/card';
+import Card from '../../../common/_mixin/Card';
 import TdtRouteViewModel from './TdtRouteViewModel';
 import RoutePlan from '../results/RoutePlan';
 import PointsResult from '../results/PointsResult';
 import StatisticsResult from '../results/StatisticsResult';
 import NothingResult from '../results/NothingResult';
-import isEqual from 'lodash.isequal';
+import SmButton from '../../../common/button/Button';
+import SmInput from '../../../common/input/Input';
 
 export default {
   name: 'SmTdtRoute',
@@ -145,7 +132,9 @@ export default {
     RoutePlan,
     PointsResult,
     StatisticsResult,
-    NothingResult
+    NothingResult,
+    SmButton,
+    SmInput
   },
   mixins: [MapGetter, Control, Theme, Card],
   props: {
@@ -153,9 +142,13 @@ export default {
       type: Boolean, // 是否折叠
       default: true
     },
+    splitLine: {
+      type: Boolean,
+      default: false
+    },
     iconClass: {
       type: String,
-      default: 'sm-components-icons-luxian'
+      default: 'sm-components-icon-road'
     },
     headerName: {
       type: String,
@@ -199,12 +192,9 @@ export default {
       this.searchRoute();
     },
     data(newVal, oldVal) {
-      if (!isEqual(newVal, oldVal)) {
-        this.spinning = true;
-        this.routePlan = null;
-        this.viewModel && this.viewModel.setData(this.data);
-        this.clearRoute();
-      }
+      this.spinning = true;
+      // this.clearRoute();
+      this.viewModel && this.viewModel.setData(this.data);
     },
     status(val) {
       if (val === 'toSetStart') {
@@ -218,34 +208,18 @@ export default {
       if (val === 'finished') {
         this.searchRoute();
       }
-    },
-    textColorsData: {
-      handler() {
-        this.changeSearchInputStyle();
-        this.componentProps = Object.assign({}, this.componentProps, this.$props);
-      }
     }
   },
   beforeDestroy() {
     this.clearRoute();
   },
-  loaded() {
+  created() {
     this.viewModel = new TdtRouteViewModel({
       type: this.routeActive,
-      map: this.map,
       data: this.data
     });
   },
-  mounted() {
-    this.changeSearchInputStyle();
-  },
   methods: {
-    changeSearchInputStyle() {
-      const serachInput = this.$el.querySelectorAll('.ant-input');
-      serachInput.forEach(item => {
-        item.style.color = this.getTextColor;
-      });
-    },
     switchRoute() {
       if (this.start || this.end) {
         [this.start, this.end] = [this.end, this.start];
@@ -260,7 +234,7 @@ export default {
         if (this.start && this.end) {
           this.showRoutePlan = false;
           this.status = 'toSetStart';
-          this.viewModel && this.viewModel.clear();
+          this.viewModel && this.viewModel.removed();
         }
       });
     },
@@ -278,7 +252,7 @@ export default {
             keyWord,
             count: result.count,
             from: 'Route',
-            pageSize: 4,
+            pageSize: 7,
             mapBound
           };
           let componentListeners = {};
@@ -364,7 +338,7 @@ export default {
     searchFailed() {
       this.isError = true;
       this.routePlan = null;
-      this.viewModel && this.viewModel.clear();
+      this.viewModel && this.viewModel.removed();
     },
     clearRoute() {
       this.start = '';
@@ -374,7 +348,7 @@ export default {
       this.status = '';
       this.showRoutePlan = false;
       this.routePlan = null;
-      this.viewModel && this.viewModel.clear();
+      this.viewModel && this.viewModel.removed();
     },
     clearStart() {
       this.start = '';

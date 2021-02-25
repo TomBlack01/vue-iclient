@@ -13,9 +13,8 @@
 
 <script>
 import MapGetter from '../_mixin/map-getter';
-import Theme from '../../common/_mixin/theme';
+import Theme from '../../common/_mixin/Theme';
 import IdentifyViewModel from './IdentifyViewModel';
-import isEqual from 'lodash.isequal';
 
 export default {
   name: 'SmIdentify',
@@ -51,12 +50,12 @@ export default {
   },
   watch: {
     layerNames(val, oldVal) {
-      if (val && !isEqual(val, oldVal)) {
+      if (val) {
         this.$options.removed.call(this, oldVal);
         this.setLayers();
       }
     },
-    backgroundData() {
+    getBackground() {
       this.changeStyle();
     }
   },
@@ -232,8 +231,8 @@ export default {
     changeStyle() {
       const wrapper = document.querySelector('.leaflet-popup-content-wrapper');
       const tip = document.querySelector('.leaflet-popup-tip');
-      wrapper && (wrapper.style.background = this.backgroundData);
-      tip && (tip.style.background = this.backgroundData);
+      wrapper && (wrapper.style.background = this.getBackground);
+      tip && (tip.style.background = this.getBackground);
     }
   }
 };

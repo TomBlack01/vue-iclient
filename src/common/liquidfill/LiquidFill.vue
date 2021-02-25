@@ -3,15 +3,15 @@
 </template>
 <script>
 import echarts from 'echarts';
-import Theme from '../_mixin/theme';
+import Theme from '../_mixin/Theme';
 import 'echarts-liquidfill';
 import { ResizeSensor } from 'css-element-queries';
-import Timer from '../_mixin/timer';
-import RestService from '../../common/_utils/RestService';
+import Timer from '../_mixin/Timer';
+import ThirdService from '../_mixin/ThirdService';
 
 export default {
   name: 'SmLiquidFill',
-  mixins: [Theme, Timer],
+  mixins: [Theme, Timer, ThirdService],
   props: {
     // 百分比的值
     value: {
@@ -53,15 +53,6 @@ export default {
     waveAnimation: {
       type: Boolean,
       default: false
-    },
-    url: {
-      type: String
-    },
-    field: {
-      type: String
-    },
-    proxy: {
-      type: String
     }
   },
   data() {
@@ -78,7 +69,7 @@ export default {
     // 根据波浪数渲染数据
     calcData() {
       let data = [];
-      const formatValue = isNaN(this.finalValue) ? 0 : parseFloat(this.finalValue);
+      const formatValue = isNaN(+this.finalValue) ? 0 : parseFloat(+this.finalValue);
       for (let i = 0; i < this.waveCount; i++) {
         data.push(formatValue - i * 0.05);
       }
@@ -86,17 +77,6 @@ export default {
     }
   },
   watch: {
-    url: {
-      handler(val) {
-        if (val) {
-          this.getData();
-        } else {
-          this.finalValue = this.value;
-          this.features = null;
-        }
-      },
-      immediate: true
-    },
     waveColor(val) {
       this.waveColorData = val;
       this.updateChart();
@@ -131,15 +111,6 @@ export default {
     },
     value(val) {
       this.finalValue = val;
-    },
-    field() {
-      this.setValue(this.features);
-    },
-    proxy() {
-      this.restService && this.restService.setProxy(this.proxy);
-      if (this.url) {
-        this.getData();
-      }
     }
   },
   mounted() {
@@ -176,7 +147,7 @@ export default {
       });
     },
     updateChart(propsUpdate = false) {
-      this.chart.setOption({
+      this.chart && this.chart.setOption({
         series: [
           {
             color: [this.waveColorData],
@@ -211,23 +182,6 @@ export default {
     },
     timing() {
       this.getData();
-    },
-    fetchData({ features }) {
-      this.features = features;
-      this.setValue(features);
-    },
-    getData() {
-      if (!this.restService) {
-        this.restService = new RestService({ proxy: this.proxy });
-        this.restService.on({ getdatasucceeded: this.fetchData });
-      }
-      this.restService.getData(this.url);
-    },
-    setValue(features) {
-      if (features && !!features.length) {
-        const field = this.field;
-        this.finalValue = features[0].properties[field];
-      }
     }
   }
 };

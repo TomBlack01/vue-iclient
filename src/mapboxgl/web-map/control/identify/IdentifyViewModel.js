@@ -11,12 +11,17 @@ import mapboxgl from '../../../../../static/libs/mapboxgl/mapbox-gl-enhance';
  * @param {Object} [options.layerStyle.stokeLine] - 面图层样式配置。
  * @extends mapboxgl.Evented
  */
-
+const HIGHLIGHT_COLOR = '#01ffff';
+const defaultPaintTypes = {
+  circle: ['circle-radius', 'circle-stroke-width'],
+  line: ['line-width'],
+  fill: ['line-width']
+};
 export default class IdentifyViewModel extends mapboxgl.Evented {
   constructor(map, options) {
     super();
     this.map = map;
-    this.layers = options.layers;
+    this.layers = options.layers || [];
     this.layerStyle = options.layerStyle || {};
     this.popup = null;
   }
@@ -31,7 +36,8 @@ export default class IdentifyViewModel extends mapboxgl.Evented {
       popupContainer.style.display = 'block';
       this.popup = new mapboxgl.Popup({
         maxWidth: 'none',
-        className: 'sm-mapboxgl-identify-popup'
+        className: 'sm-mapboxgl-identify-popup sm-mapboxgl-tabel-popup',
+        closeButton: false
       })
         .setLngLat(coordinates)
         .setDOMContent(popupContainer)
@@ -47,20 +53,19 @@ export default class IdentifyViewModel extends mapboxgl.Evented {
   addOverlayToMap(layer, filter) {
     let mbglStyle = {
       circle: {
-        'circle-color': '#409eff',
+        'circle-color': HIGHLIGHT_COLOR,
         'circle-opacity': 0.6,
-        'circle-stroke-color': '#409eff',
+        'circle-stroke-color': HIGHLIGHT_COLOR,
         'circle-stroke-opacity': 1
       },
       line: {
-        'line-width': 3,
-        'line-color': '#409eff',
+        'line-color': HIGHLIGHT_COLOR,
         'line-opacity': 1
       },
       fill: {
-        'fill-color': '#409eff',
+        'fill-color': HIGHLIGHT_COLOR,
         'fill-opacity': 0.6,
-        'fill-outline-color': '#409eff'
+        'fill-outline-color': HIGHLIGHT_COLOR
       },
       symbol: {
         layout: {
@@ -68,30 +73,37 @@ export default class IdentifyViewModel extends mapboxgl.Evented {
         }
       }
     };
-    let type = layer.type;
-    let layerID = layer.id;
+    let { type, id, paint } = layer;
+    // 如果是面的strokline,处理成面
+    if (id.includes('-strokeLine') && type === 'line') {
+      type = 'fill';
+      paint = {};
+    }
+    let layerStyle = this._setDefaultPaintWidth(this.map, type, id, defaultPaintTypes[type], this.layerStyle);
     if (type === 'circle' || type === 'line' || type === 'fill') {
-      let layerStyle = this.layerStyle[type];
+      layerStyle = layerStyle[type];
       let highlightLayer = Object.assign({}, layer, {
-        id: layerID + '-SM-highlighted',
-        paint: (layerStyle && layerStyle.paint) || Object.assign({}, layer.paint, mbglStyle[type]),
-        layout: (layerStyle && layerStyle.layout) || {},
+        id: id + '-identify-SM-highlighted',
+        type,
+        paint: (layerStyle && layerStyle.paint) || Object.assign({}, paint, mbglStyle[type]),
+        layout: (layerStyle && layerStyle.layout) || { visibility: 'visible' },
         filter
       });
       this.map.addLayer(highlightLayer);
     }
     if (type === 'fill') {
-      let strokeLayerID = layerID + '-SM-StrokeLine';
-      let stokeLineStyle = this.layerStyle.stokeLine || {};
+      let strokeLayerID = id + '-identify-SM-StrokeLine';
+      let stokeLineStyle = layerStyle.strokeLine || layerStyle.stokeLine || {};
       let lineStyle = (stokeLineStyle && stokeLineStyle.paint) || {
         'line-width': 3,
-        'line-color': '#409eff',
+        'line-color': HIGHLIGHT_COLOR,
         'line-opacity': 1
       };
       let highlightLayer = Object.assign({}, layer, {
         id: strokeLayerID,
         type: 'line',
         paint: lineStyle,
+        layout: { visibility: 'visible' },
         filter
       });
       this.map.addLayer(highlightLayer);
@@ -108,15 +120,46 @@ export default class IdentifyViewModel extends mapboxgl.Evented {
   }
   /**
    * @function IdentifyViewModel.prototype.removed
-   * @desc 清除高亮图层。
+   * @desc 清除popup和高亮图层。
    */
   removed(layers = this.layers) {
     // 移除高亮图层
-    this.popup && this.popup.remove() && (this.popup = null);
+    this.removePopup();
+    this.removeOverlayer(layers);
+  }
+  removePopup() {
+    if (this.popup) {
+      this.popup.remove() && (this.popup = null);
+    }
+  }
+  removeOverlayer(layers = this.layers) {
     layers &&
       layers.forEach(layerId => {
-        this.map && this.map.getLayer(layerId + '-SM-highlighted') && this.map.removeLayer(layerId + '-SM-highlighted');
-        this.map && this.map.getLayer(layerId + '-SM-StrokeLine') && this.map.removeLayer(layerId + '-SM-StrokeLine');
+        this.map &&
+          this.map.getLayer(layerId + '-identify-SM-highlighted') &&
+          this.map.removeLayer(layerId + '-identify-SM-highlighted');
+        this.map &&
+          this.map.getLayer(layerId + '-identify-SM-StrokeLine') &&
+          this.map.removeLayer(layerId + '-identify-SM-StrokeLine');
       });
+  }
+
+  _setDefaultPaintWidth(map, type, layerId, paintTypes, layerStyle) {
+    if (!paintTypes) {
+      return;
+    }
+    paintTypes.forEach(paintType => {
+      let mapPaintProperty;
+      if (type !== 'fill') {
+        mapPaintProperty = map.getLayer(layerId) && map.getPaintProperty(layerId, paintType);
+      } else {
+        type = 'stokeLine';
+      }
+      layerStyle[type].paint[paintType] = layerStyle[type].paint[paintType] || mapPaintProperty;
+      if (layerStyle[type].paint[paintType] === void 0 || layerStyle[type].paint[paintType] === '') {
+        layerStyle[type].paint[paintType] = paintType === 'circle-stroke-width' || type === 'stokeLine' ? 2 : 8;
+      }
+    });
+    return layerStyle;
   }
 }

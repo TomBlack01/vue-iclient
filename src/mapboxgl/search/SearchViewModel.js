@@ -35,7 +35,7 @@ import { getFeatureCenter } from '../../common/_utils/util';
  * @fires SearchViewModel#searchfailed
  */
 export default class SearchViewModel extends mapboxgl.Evented {
-  constructor(map, options) {
+  constructor(options) {
     super();
     this.options = options || {};
     this.searchTaskId = 0;
@@ -43,15 +43,15 @@ export default class SearchViewModel extends mapboxgl.Evented {
       addressUrl: 'https://www.supermapol.com/iserver/services/localsearch/rest/searchdatas/China/poiinfos',
       key: options.onlineLocalSearch.key || 'fvV2osxwuZWlY0wJb8FEb2i5'
     };
-    if (map) {
-      this.map = map;
-    } else {
-      return new Error(`Cannot find map`);
-    }
     this.searchtType = ['layerNames', 'onlineLocalSearch', 'restMap', 'restData', 'iportalData', 'addressMatch'];
     this.markerList = [];
     this.popupList = [];
     this.errorSourceList = {};
+  }
+
+  setMap(mapInfo) {
+    const { map } = mapInfo;
+    this.map = map;
   }
 
   /**
@@ -182,6 +182,8 @@ export default class SearchViewModel extends mapboxgl.Evented {
     const popup = new mapboxgl.Popup({
       className: 'sm-mapboxgl-tabel-popup sm-component-search-result-popup',
       closeOnClick: true,
+      closeButton: false,
+      maxWidth: 'none',
       anchor: 'bottom'
     });
     const marker = new mapboxgl.Marker();
@@ -289,6 +291,7 @@ export default class SearchViewModel extends mapboxgl.Evented {
       if (restMap.proxy) {
         options.proxy = restMap.proxy;
       }
+      restMap.epsgCode && (options.epsgCode = restMap.epsgCode);
       let iserverService = new iServerRestService(restMap.url, options);
       iserverService.on({
         getdatafailed: e => {
@@ -318,6 +321,7 @@ export default class SearchViewModel extends mapboxgl.Evented {
       if (restData.proxy) {
         options.proxy = restData.proxy;
       }
+      restData.epsgCode && (options.epsgCode = restData.epsgCode);
       let iserverService = new iServerRestService(restData.url, options);
       iserverService.on({
         getdatafailed: e => {
@@ -345,7 +349,7 @@ export default class SearchViewModel extends mapboxgl.Evented {
   _searchFromIportal(iportalDatas) {
     const sourceName = 'Iportal Search';
     iportalDatas.forEach(iportal => {
-      let iPortalService = new iPortalDataService(iportal.url, iportal.withCredentials || false);
+      let iPortalService = new iPortalDataService(iportal.url, iportal.withCredentials || false, { epsgCode: iportal.epsgCode });
       iPortalService.on({
         getdatafailed: e => {
           this._searchFeaturesFailed('', iportal.name || sourceName);
@@ -502,7 +506,7 @@ export default class SearchViewModel extends mapboxgl.Evented {
     this._clearPopups();
   }
 
-  clear() {
+  removed() {
     this.searchTaskId = 0;
     this.searchResult = {};
     this.errorSourceList = {};
